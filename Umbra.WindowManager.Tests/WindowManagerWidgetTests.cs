@@ -58,7 +58,9 @@ public class WindowManagerWidgetTests
         Assert.Single(widget.Node.ChildNodes);
         Assert.True(widget.WindowNodes.TryGetValue("TestWindow##TestId", out var btnNode));
         Assert.NotNull(btnNode);
-        Assert.Equal("TestWindow", btnNode.NodeValue);
+        // Button is [icon][label]; the clean title lives on the label child (issue #5).
+        Assert.Equal("T", btnNode.ChildNodes[0].NodeValue);       // monogram icon fallback
+        Assert.Equal("TestWindow", btnNode.ChildNodes[1].NodeValue);
         Assert.Equal("TestWindow", btnNode.Tooltip);
         Assert.Equal(1.0f, btnNode.Style.Opacity);
         Assert.Contains("open", btnNode.ClassList);
@@ -125,21 +127,24 @@ public class WindowManagerWidgetTests
 
         var widget = CreateWidget(service);
 
-        // Auto mode -> shows text
+        // Auto mode (single window) -> Taskbar-like, label visible.
         widget.DisplayMode = "Auto";
         widget.UpdateButtons();
-        Assert.Equal("DisplayModeWin", widget.WindowNodes["DisplayModeWin"].NodeValue);
+        var node = widget.WindowNodes["DisplayModeWin"];
+        Assert.Equal("DisplayModeWin", node.ChildNodes[1].NodeValue);
+        Assert.NotEqual(false, node.ChildNodes[1].Style.IsVisible);
 
-        // Taskbar mode -> shows text
+        // Taskbar mode -> label visible.
         widget.DisplayMode = "Taskbar";
         widget.UpdateButtons();
-        Assert.Equal("DisplayModeWin", widget.WindowNodes["DisplayModeWin"].NodeValue);
+        Assert.NotEqual(false, node.ChildNodes[1].Style.IsVisible);
 
-        // IconOnly mode -> empty text
+        // IconOnly mode -> label hidden, tooltip retains the title, icon still present.
         widget.DisplayMode = "IconOnly";
         widget.UpdateButtons();
-        Assert.Equal(string.Empty, widget.WindowNodes["DisplayModeWin"].NodeValue);
-        Assert.Equal("DisplayModeWin", widget.WindowNodes["DisplayModeWin"].Tooltip);
+        Assert.False(node.ChildNodes[1].Style.IsVisible ?? true);
+        Assert.Equal("D", node.ChildNodes[0].NodeValue);
+        Assert.Equal("DisplayModeWin", node.Tooltip);
     }
 
     [Fact]
@@ -172,23 +177,130 @@ public class WindowManagerWidgetTests
     }
 
     [Fact]
-    public void UpdateButtons_RightClickClosesWindow()
+    public void UpdateButtons_ClickActsOnReinstantiatedWindow()
     {
+        // Regression for issue #2: after a plugin re-instantiates a same-named window, the button's
+        // click handler must act on the NEW TrackedWindow, not the dead original.
         var service = new WindowManagerService();
-        var win = new DummyWindow("CloseWin");
-        var tw = service.RegisterWindow(win);
+        var win1 = new DummyWindow("Reload##Same") { IsOpen = true, IsFocused = true };
+        var tw1 = service.RegisterWindow(win1);
 
         var widget = CreateWidget(service);
         widget.UpdateButtons();
 
-        var btnNode = widget.WindowNodes["CloseWin"];
+        var win2 = new DummyWindow("Reload##Same") { IsOpen = true, IsFocused = true };
+        var tw2 = service.RegisterWindow(win2);
+        Assert.NotSame(tw1, tw2);
 
-        var rClickEvent = typeof(Node).GetField("OnRightClick", BindingFlags.Instance | BindingFlags.NonPublic);
-        var rClickDelegate = rClickEvent?.GetValue(btnNode) as Action<Node>;
-        rClickDelegate?.Invoke(btnNode);
+        widget.UpdateButtons();
 
-        Assert.False(tw.IsOpen);
+        var btnNode = widget.WindowNodes["Reload##Same"];
+        var clickEvent = typeof(Node).GetField("OnClick", BindingFlags.Instance | BindingFlags.NonPublic);
+        var clickDelegate = clickEvent?.GetValue(btnNode) as Action<Node>;
+        clickDelegate?.Invoke(btnNode);
+
+        // New instance is focused+open -> minimized; old instance untouched.
+        Assert.True(tw2.IsMinimized);
+        Assert.False(win2.IsOpen);
+        Assert.False(tw1.IsMinimized);
+        Assert.True(win1.IsOpen);
+    }
+
+    [Fact]
+    public void BuildContextActions_OpenWindow_OffersMinimizeAndClose()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Ctx##Open") { IsOpen = true };
+        var tw = service.RegisterWindow(win);
+        var widget = CreateWidget(service);
+
+        var actions = widget.BuildContextActions(tw);
+        Assert.Equal(new[] { "minimize", "close" }, actions.Select(a => a.Id).ToArray());
+
+        actions.Single(a => a.Id == "close").Execute();
+        Assert.False(win.IsOpen);
         Assert.False(tw.IsMinimized);
+    }
+
+    [Fact]
+    public void BuildContextActions_MinimizedWindow_OffersRestoreAndClose()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Ctx##Min") { IsOpen = true };
+        var tw = service.RegisterWindow(win);
+        service.Minimize(tw);
+        var widget = CreateWidget(service);
+
+        var actions = widget.BuildContextActions(tw);
+        Assert.Equal(new[] { "restore", "close" }, actions.Select(a => a.Id).ToArray());
+
+        actions.Single(a => a.Id == "restore").Execute();
+        Assert.False(tw.IsMinimized);
+        Assert.True(win.IsOpen);
+    }
+
+    [Fact]
+    public void BuildContextActions_DockGroup_OffersSelectActiveAndCloseAll()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab A") { IsOpen = true };
+        var win2 = new DummyWindow("Tab B") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+        service.RegisterDockGroup("dock_ctx", "Tab A", new[] { tw1, tw2 });
+
+        var widget = CreateWidget(service);
+        var actions = widget.BuildContextActions(tw1);
+        Assert.Equal(new[] { "select_active", "close_all" }, actions.Select(a => a.Id).ToArray());
+
+        actions.Single(a => a.Id == "close_all").Execute();
+        Assert.False(win1.IsOpen);
+        Assert.False(win2.IsOpen);
+    }
+
+    [Theory]
+    [InlineData("Peeping Tom", "P")]
+    [InlineData("  spaced title", "S")]
+    [InlineData("", "?")]
+    [InlineData("   ", "?")]
+    public void GetMonogram_ReturnsFirstUpperNonWhitespaceChar(string input, string expected)
+    {
+        Assert.Equal(expected, WindowManagerWidget.GetMonogram(input));
+    }
+
+    [Theory]
+    [InlineData(0, "Taskbar")]
+    [InlineData(3, "Taskbar")]
+    [InlineData(6, "Taskbar")]
+    [InlineData(7, "IconOnly")]
+    [InlineData(13, "Dropdown")]
+    public void ResolveAutoMode_UnknownWidth_UsesCountHeuristic(int count, string expected)
+    {
+        Assert.Equal(expected, WindowManagerWidget.ResolveAutoMode(count, 100f, 0f));
+    }
+
+    [Fact]
+    public void ResolveAutoMode_KnownWidth_CondensesUnderPressure()
+    {
+        Assert.Equal("Taskbar", WindowManagerWidget.ResolveAutoMode(3, 100f, 400f));
+        Assert.Equal("IconOnly", WindowManagerWidget.ResolveAutoMode(5, 100f, 400f));
+        Assert.Equal("Dropdown", WindowManagerWidget.ResolveAutoMode(10, 100f, 300f));
+    }
+
+    [Fact]
+    public void UpdateButtons_LabelConfiguredForEllipsis()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("A Very Long Window Title That Exceeds");
+        service.RegisterWindow(win);
+        var widget = CreateWidget(service);
+        widget.MaxTitleWidth = 120;
+        widget.UpdateButtons();
+
+        var label = widget.WindowNodes["A Very Long Window Title That Exceeds"].ChildNodes[1];
+        Assert.Equal(120f, label.Style.MaxWidth!.Value);
+        Assert.False(label.Style.WordWrap!.Value);
+        Assert.False(label.Style.TextOverflow!.Value);
     }
 
     [Fact]
