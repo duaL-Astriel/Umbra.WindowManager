@@ -14,7 +14,7 @@ Umbra Window Manager is a first-class taskbar and window manager plugin for the 
 3. **ImGui Collapse Interception**: Intercepts native ImGui window collapse triggers (title bar double-clicks and collapse buttons), immediately uncollapsing them and directing them into full toolbar minimizes.
 4. **Dock Group Management**: Discovers multi-window tab groups sharing an `ImGuiDockNodePtr`. Synchronizes their minimize and restore actions so the entire tab stack disappears and reappears as a unified unit, preserving active tab focus.
 5. **Memory Safety**: Uses `WeakReference<IWindow>` throughout all internal caches to prevent memory retention or obstruction of plugin hot-reloads.
-6. **Zero Warnings & Full Test Coverage**: Compiles under .NET 10 (`net10.0-windows`) with 0 warnings, 0 errors, and 100% pass rate across 62 automated xUnit tests.
+6. **Zero Warnings & Full Test Coverage**: Compiles under .NET 10 (`net10.0-windows`) with 0 warnings, 0 errors, and a 100% pass rate across the automated xUnit suite (79 tests at time of writing; run `dotnet test` for the current count).
 
 ---
 
@@ -35,7 +35,7 @@ Umbra Window Manager is a first-class taskbar and window manager plugin for the 
 │  │     - Central thread-safe state machine                          │  │
 │  │     - Window lifecycle: Register, Unregister, Toggle             │  │
 │  │     - Dock group tracking & active tab restoration               │  │
-│  │     - OnWindowsChanged event dispatcher                          │  │
+│  │     - Idempotent dock-group registration (alloc-free redraws)    │  │
 │  └───────────────┬─────────────────────────────────┬────────────────┘  │
 └──────────────────┼─────────────────────────────────┼───────────────────┘
                    │                                 │
@@ -82,8 +82,8 @@ ImGui windows typically encode unique identifiers using `##` (name override) or 
   - `Restore(TrackedWindow)`: Delegates to `DockGroup.Restore()` if grouped, otherwise restores individually and brings to front.
   - `Toggle(TrackedWindow)`: If minimized or closed $\rightarrow$ restore; if open and focused $\rightarrow$ minimize; if open and unfocused $\rightarrow$ bring to front.
   - `Close(TrackedWindow)`: Marks `IsOpen = false` and clears minimized state.
-  - `RegisterDockGroup(...)` / `RemoveDockGroup(groupKey)`: Manages group keys and clears `DockGroupKey` on members when groups dissolve.
-  - `OnWindowsChanged`: Action event invoked on any state mutation.
+  - `RegisterDockGroup(...)` / `RemoveDockGroup(groupKey)`: Manages group keys and clears `DockGroupKey` on members when groups dissolve. `RegisterDockGroup` is **idempotent** — if the group key, active tab, and exact member set are unchanged, it reuses the existing `DockGroup` instead of allocating a new one, keeping the per-frame draw loop allocation-free.
+  - `CloseDockGroup(groupKey)`: Closes every member of a dock group (backs the "Close All Tabs" context-menu action).
 
 #### D. Discovery & Title Bar Button Injection (`DalamudWindowTracker.cs`)
 - Decorated with `[Service]` and `[OnTick(interval: 2000)]` for periodic scanning.
@@ -98,7 +98,7 @@ ImGui windows typically encode unique identifiers using `##` (name override) or 
 - Decorated with `[Service]` and `[OnDraw(executionOrder: 10)]`.
 - **Native Collapse Guard**: Iterates through `ctx.Windows`. If `win.Collapsed` is true (triggered by user double-clicking a title bar or clicking the native collapse triangle), it immediately resets `win.Collapsed = false` and calls `WindowManagerService.Minimize(tracked)`.
 - **Dock Group Tracking**: Inspects `win.DockIsActive` and `win.DockNode`. Group members are aggregated by `win.DockId`. The visible tab is captured via `win.DockTabIsVisible`. Multi-window dock containers are registered with `WindowManagerService.RegisterDockGroup(...)`.
-- **Zero Draw-Loop Allocations**: Implements collection recycling (`listPool`) to eliminate per-frame allocations during the render loop.
+- **Zero Draw-Loop Allocations**: Member lists are recycled via `listPool`, the `dock_{id}` group keys are cached per dock id, and `WindowManagerService.RegisterDockGroup` is idempotent — so a stable multi-window dock group no longer allocates a `DockGroup`, a member list, or a key string on every frame (resolves the allocation churn described in issue #6).
 
 #### F. Toolbar Widget UI (`WindowManagerWidget.cs`)
 - Decorated with `[ToolbarWidget("UmbraWindowManagerWidget", "Window Manager", ...)]`.
@@ -109,14 +109,28 @@ ImGui windows typically encode unique identifiers using `##` (name override) or 
     - `.open`: Visible background window.
     - `.minimized`: Minimized window (opacity dimmed to `0.6f`).
     - `.dock-group`: Member of a docked tab container.
+- **Per-Window Icons**: Each button is composed of an icon child node plus a label child node. The icon
+  is the owning plugin's icon bytes (`images/icon.png`, resolved via reflection in `DalamudWindowTracker`
+  and carried on `TrackedWindow.IconBytes`) when available, falling back to an upper-cased text monogram of
+  the clean title so Icon-Only mode is never blank. The label uses `WordWrap = false` + `TextOverflow = false`
+  with `MaxWidth` so long titles ellipsize rather than clip.
+- **Display Modes** (all functional):
+  - `Taskbar`: icon + label per window.
+  - `IconOnly`: icon only, full title in the tooltip (label hidden).
+  - `Dropdown`: a single toolbar button with a window-count badge whose `Popup` is an Umbra `MenuPopup`
+    listing every window.
+  - `Auto` (default): resolves to Taskbar and condenses toward IconOnly then Dropdown as available
+    toolbar width (or, when width is unknown, the window count) is exceeded.
 - **Configurable Settings**:
   - `DisplayMode`: `"Auto"` (default), `"Taskbar"`, `"IconOnly"`, `"Dropdown"`.
   - `MaxTitleWidth`: Maximum pixel width (default: 140px, range: 60–300px).
   - `GroupDockedTabs`: Boolean (default: true) toggling collective tab group handling.
   - Backing field properties synchronize with `SetConfigValue` when registered in Umbra config.
 - **Mouse Event Handlers**:
-  - `OnClick`: Calls `WindowManagerService.Toggle(window)`.
-  - `OnRightClick`: Calls `WindowManagerService.Close(window)`.
+  - `OnClick`: Resolves the *current* `TrackedWindow` by name (so it survives a plugin re-instantiating a
+    same-named window — issue #2) and calls `WindowManagerService.Toggle(window)`.
+  - `OnRightClick`: Opens a per-state context menu (`ContextMenu`) offering Minimize/Restore + Close, or
+    Select Active Tab / Close All Tabs for dock groups — instead of the old destructive one-click close.
 
 ---
 
@@ -129,7 +143,7 @@ ImGui windows typically encode unique identifiers using `##` (name override) or 
 | **Restore Window** | Left-click minimized toolbar button | Window `IsOpen` becomes `true`; brought to front and focused. |
 | **Focus Window** | Left-click unfocused open toolbar button | Window brought to front and gains input focus. |
 | **Toggle Active Window** | Left-click already-focused toolbar button | Window minimizes back to toolbar. |
-| **Close Window** | Right-click toolbar button | Window `IsOpen` becomes `false`; button disappears from toolbar. |
+| **Context Menu** | Right-click toolbar button | Opens a per-state context menu (Minimize/Restore, Close; or Select Active Tab / Close All Tabs for a dock group) rather than closing directly. |
 | **Group Minimize** | Minimize any tab in a docked tab group | All sibling tabs set `IsOpen = false`; dock container disappears. |
 | **Group Restore** | Left-click docked group button in toolbar | All sibling tabs set `IsOpen = true`; previously active tab brought to front and focused. |
 
@@ -146,69 +160,27 @@ ImGui windows typically encode unique identifiers using `##` (name override) or 
 ### Test Suite Execution
 - Command: `dotnet test`
 - Framework: xUnit with .NET 10.0 runtime
-- Results: **62 Passed, 0 Failed, 0 Skipped** (Total Duration: ~49 ms)
+- Results: **79 Passed, 0 Failed, 0 Skipped** at time of writing. Run `dotnet test` for the current
+  count; the number grows as coverage is added, so it is intentionally not hard-coded elsewhere.
 
 ### Test Class Breakdown
 
-```text
-Test Suite Summary:
-├── WindowInfoHelperTests (15 tests across 4 theories)
-│   ├── GetCleanTitle_StripsImGuiIdentifiers (5 cases)
-│   ├── GetCleanTitle_NullOrWhitespace_ReturnsEmpty (3 cases)
-│   ├── GetWindowId_ExtractsIdentifierOrFallback (4 cases)
-│   └── GetWindowId_NullOrWhitespace_ReturnsEmpty (3 cases)
-├── DockGroupTests (10 tests)
-│   ├── DockGroup_MinimizeAll_HidesAllMembers
-│   ├── DockGroup_RestoreAll_OpensAllMembersAndRestoresActiveTab
-│   ├── TrackedWindow_Properties_InitializedCorrectly
-│   ├── TrackedWindow_NullNamespace_DefaultsToEmptyString
-│   ├── TrackedWindow_IsOpen_UpdatesUnderlyingWindow
-│   ├── TrackedWindow_BringToFront_SetsRequestFocus
-│   ├── TrackedWindow_WhenWindowCollected_TryGetWindowReturnsFalse
-│   ├── DockGroup_Constructor_SetsDockGroupKeyOnMembers
-│   ├── DockGroup_Restore_FallbackToFirstMemberIfActiveNotFound
-│   └── DockGroup_EmptyMembers_MinimizeAndRestoreDoNotThrow
-├── WindowManagerServiceTests (17 tests)
-│   ├── WindowManagerService_SingleWindow_Lifecycle
-│   ├── WindowManagerService_Toggle_InvertsState
-│   ├── WindowManagerService_Toggle_OpenAndNotFocused_BringsToFront
-│   ├── WindowManagerService_Toggle_ClosedNotMinimized_Restores
-│   ├── WindowManagerService_UnregisterWindow_RemovesWindow
-│   ├── WindowManagerService_Close_ResetsMinimizedAndClosesWindow
-│   ├── WindowManagerService_GetVisibleAndMinimizedWindows_FiltersCorrectly
-│   ├── WindowManagerService_DockGroup_MinimizeAndRestore_AffectsAllGroupMembers
-│   ├── WindowManagerService_DockGroup_RemoveDockGroup_RestoresIndividualBehavior
-│   ├── WindowManagerService_OnWindowsChanged_FiresOnMutations
-│   ├── WindowManagerService_GetTrackedWindows_ExcludesGarbageCollectedWindows
-│   ├── WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesGarbageCollectedMinimizedWindows
-│   ├── WindowManagerService_RegisterWindow_WhenWindowReinstantiated_ReplacesStaleTrackedWindow
-│   ├── WindowManagerService_RemoveDockGroup_ClearsDockGroupKeyOnMembers
-│   ├── WindowManagerService_ZeroAllocOverloads_PopulateProvidedLists
-│   ├── WindowManagerService_PruneDeadWindows_RemovesGarbageCollectedWindowsFromDictionary
-│   └── WindowManagerService_RegisterWindow_WhenInstanceUnchanged_DoesNotFireOnWindowsChanged
-├── DalamudWindowTrackerTests (8 tests)
-│   ├── InjectMinimizeButton_AddsButtonOnceAndBindsClick
-│   ├── InjectMinimizeButton_NullTitleBarButtons_DoesNotThrow
-│   ├── TrackWindowSystem_RegistersWindowsAndInjectsButtons
-│   ├── TrackWindowSystem_RecreatedWindowWithSameName_ReceivesMinimizeButton
-│   ├── TrackWindowSystem_SkipsEmptyOrWhitespaceWindowNames
-│   ├── ScanPlugins_DoesNotThrow_WhenPluginManagerNotAvailable
-│   ├── ScanObjectForWindowSystems_DiscoversWindowSystemsInPropertiesAndFields
-│   └── ScanObjectForWindowSystems_TraversesBaseClassHierarchy
-└── WindowManagerWidgetTests (12 tests)
-    ├── Constructor_InitializesRootNodeWithExpectedStyles
-    ├── UpdateButtons_CreatesButtonForOpenWindow
-    ├── UpdateButtons_AppliesMinimizedStyleAndTooltip
-    ├── UpdateButtons_AppliesActiveStyleWhenFocused
-    ├── UpdateButtons_RemovesNodeWhenWindowNoLongerVisible
-    ├── UpdateButtons_HandlesDisplayModes (Auto, Taskbar, IconOnly)
-    ├── UpdateButtons_LeftClickTogglesWindow
-    ├── UpdateButtons_RightClickClosesWindow
-    ├── UpdateButtons_MarksDockGroupWhenDockGroupKeyIsPresent
-    ├── UpdateButtons_TogglesDockGroupOff_WhenDockGroupKeyBecomesNull
-    ├── GetConfigVariables_ReturnsExpectedVariables
-    └── PropertySetters_UpdateBackingFieldsAndSyncWhenConfigured
-```
+The suite is organized into five test classes (run `dotnet test --list-tests` for the authoritative,
+up-to-date list of individual cases):
+
+- **`WindowInfoHelperTests`** — ImGui `##` / `###` title and identifier parsing.
+- **`DockGroupTests`** — `TrackedWindow` weak-reference semantics and `DockGroup` group minimize/restore
+  with active-tab preservation.
+- **`WindowManagerServiceTests`** — the state machine: register/unregister, minimize/restore/toggle/close,
+  GC filtering, re-instantiation replacement, dock-group minimize/restore/close, and **idempotent
+  dock-group registration** (issue #6).
+- **`DalamudWindowTrackerTests`** — reflection-based `WindowSystem` discovery (properties, fields, base
+  types), title-bar minimize-button injection including **injection alongside a plugin's own minimize
+  button** (issue #8.1), and **plugin name/icon association** (issue #5).
+- **`WindowManagerWidgetTests`** — node hierarchy, display modes, config variables, **click acting on the
+  re-instantiated window** (issue #2), the **per-state right-click context-menu actions** (issue #3),
+  icon monogram fallback, **Auto-mode condensing resolution** (issue #4), and label ellipsis styling
+  (issue #8.4).
 
 ---
 
@@ -236,6 +208,19 @@ To verify the plugin in an active Final Fantasy XIV client with Dalamud and Umbr
 5. **Native Collapse Interception**:
    - Double-click the title bar of an open window or click the collapse triangle.
    - Verify that the window does not collapse into a tiny bar; instead, it is cleanly minimized to the Umbra toolbar.
-6. **Display Modes & Configuration**:
-   - In Umbra Widget Settings, switch `DisplayMode` between `Taskbar`, `IconOnly`, and `Dropdown`.
+6. **Right-Click Context Menu**:
+   - Right-click a toolbar button for an open window; verify a context menu appears with **Minimize** and **Close** (not an immediate close).
+   - Right-click a minimized window's button; verify the menu offers **Restore** and **Close**.
+   - Right-click a docked tab group's button; verify the menu offers **Select Active Tab** and **Close All Tabs**.
+7. **Per-Window Icons**:
+   - Verify buttons show the owning plugin's icon where one is available, and a single-letter monogram otherwise.
+   - Switch to `IconOnly` and confirm buttons still show an icon/monogram (never blank) with the title in the tooltip.
+8. **Display Modes & Configuration**:
+   - In Umbra Widget Settings, switch `DisplayMode` between `Taskbar`, `IconOnly`, `Dropdown`, and `Auto`.
+   - Verify `Dropdown` collapses to a single button with a window-count badge that opens a `MenuPopup`, and
+     that `Auto` behaves like Taskbar until the toolbar runs short of width, then condenses.
    - Verify that button widths and labels update interactively in real time.
+
+> **Loading the plugin:** see the "Installing into Umbra" section of the README — Umbra loads this
+> assembly through its custom-plugin system (enable Custom Plugins, then add the built DLL); no Dalamud
+> manifest is required.
