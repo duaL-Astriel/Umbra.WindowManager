@@ -25,7 +25,7 @@ public class WindowManagerService
     public IReadOnlyList<TrackedWindow> GetVisibleAndMinimizedWindows()
     {
         return this.windows.Values
-            .Where(w => (w.IsOpen || w.IsMinimized) && !string.IsNullOrWhiteSpace(w.CleanTitle))
+            .Where(w => w.TryGetWindow(out _) && (w.IsOpen || w.IsMinimized) && !string.IsNullOrWhiteSpace(w.CleanTitle))
             .ToList();
     }
 
@@ -33,7 +33,12 @@ public class WindowManagerService
 
     public TrackedWindow RegisterWindow(IWindow window)
     {
-        var tw = this.windows.GetOrAdd(window.WindowName, _ => new TrackedWindow(window));
+        var tw = this.windows.AddOrUpdate(
+            window.WindowName,
+            _ => new TrackedWindow(window),
+            (_, existing) => existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window)
+                ? existing
+                : new TrackedWindow(window));
         this.OnWindowsChanged?.Invoke();
         return tw;
     }
@@ -106,6 +111,13 @@ public class WindowManagerService
 
     public void RemoveDockGroup(string groupKey)
     {
-        this.dockGroups.TryRemove(groupKey, out _);
+        if (this.dockGroups.TryRemove(groupKey, out var group))
+        {
+            foreach (var member in group.Members)
+            {
+                if (member.DockGroupKey == groupKey)
+                    member.DockGroupKey = null;
+            }
+        }
     }
 }

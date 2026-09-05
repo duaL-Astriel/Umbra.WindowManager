@@ -244,4 +244,69 @@ public class WindowManagerServiceTests
         Assert.False(tw.TryGetWindow(out _));
         Assert.Empty(service.GetTrackedWindows());
     }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesGarbageCollectedMinimizedWindows()
+    {
+        var service = new WindowManagerService();
+
+        TrackedWindow RegisterAndMinimize()
+        {
+            var win = new DummyWindow("Dead Minimized Window") { IsOpen = true };
+            var tw = service.RegisterWindow(win);
+            service.Minimize(tw);
+            return tw;
+        }
+
+        var tracked = RegisterAndMinimize();
+        Assert.True(tracked.IsMinimized);
+        Assert.Single(service.GetVisibleAndMinimizedWindows());
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.False(tracked.TryGetWindow(out _));
+        Assert.Empty(service.GetVisibleAndMinimizedWindows());
+        Assert.Empty(service.GetActiveAndMinimizedWindows());
+    }
+
+    [Fact]
+    public void WindowManagerService_RegisterWindow_WhenWindowReinstantiated_ReplacesStaleTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("SameTitle##Id") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+
+        // Same window instance returns same TrackedWindow
+        var tw1Again = service.RegisterWindow(win1);
+        Assert.Same(tw1, tw1Again);
+
+        // New window instance with same WindowName replaces stale entry
+        var win2 = new DummyWindow("SameTitle##Id") { IsOpen = true };
+        var tw2 = service.RegisterWindow(win2);
+
+        Assert.NotSame(tw1, tw2);
+        Assert.True(tw2.TryGetWindow(out var retrieved));
+        Assert.Same(win2, retrieved);
+    }
+
+    [Fact]
+    public void WindowManagerService_RemoveDockGroup_ClearsDockGroupKeyOnMembers()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab 1");
+        var win2 = new DummyWindow("Tab 2");
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+
+        service.RegisterDockGroup("dock_group_to_remove", "Tab 1", new[] { tw1, tw2 });
+        Assert.Equal("dock_group_to_remove", tw1.DockGroupKey);
+        Assert.Equal("dock_group_to_remove", tw2.DockGroupKey);
+
+        service.RemoveDockGroup("dock_group_to_remove");
+
+        Assert.Null(tw1.DockGroupKey);
+        Assert.Null(tw2.DockGroupKey);
+    }
 }
