@@ -207,6 +207,27 @@ public class WindowManagerWidgetTests
     }
 
     [Fact]
+    public void UpdateButtons_TogglesDockGroupOff_WhenDockGroupKeyBecomesNull()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("DockedTab");
+        var tw = service.RegisterWindow(win);
+        tw.DockGroupKey = "dock_123";
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["DockedTab"];
+        Assert.Contains("dock-group", btnNode.ClassList);
+
+        // Undock the window
+        tw.DockGroupKey = null;
+        widget.UpdateButtons();
+
+        Assert.DoesNotContain("dock-group", btnNode.ClassList);
+    }
+
+    [Fact]
     public void GetConfigVariables_ReturnsExpectedVariables()
     {
         var service = new WindowManagerService();
@@ -221,5 +242,21 @@ public class WindowManagerWidgetTests
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
+    }
+
+    [Fact]
+    public void PropertySetters_UpdateBackingFieldsAndSyncWhenConfigured()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        widget.DisplayMode = "IconOnly";
+        Assert.Equal("IconOnly", widget.DisplayMode);
+
+        widget.MaxTitleWidth = 200;
+        Assert.Equal(200, widget.MaxTitleWidth);
+
+        widget.GroupDockedTabs = false;
+        Assert.False(widget.GroupDockedTabs);
     }
 }
