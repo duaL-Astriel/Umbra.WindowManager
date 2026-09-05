@@ -40,6 +40,18 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
+    public void InjectMinimizeButton_NullTitleBarButtons_DoesNotThrow()
+    {
+        var win = new DummyWindow("NullButtons");
+        win.TitleBarButtons = null!;
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(win);
+
+        var ex = Record.Exception(() => DalamudWindowTracker.InjectMinimizeButton(win, tw, service));
+        Assert.Null(ex);
+    }
+
+    [Fact]
     public void TrackWindowSystem_RegistersWindowsAndInjectsButtons()
     {
         var service = new WindowManagerService();
@@ -67,6 +79,32 @@ public class DalamudWindowTrackerTests
         tracker.TrackWindowSystem(ws);
         Assert.Single(win1.TitleBarButtons);
         Assert.Single(win2.TitleBarButtons);
+    }
+
+    [Fact]
+    public void TrackWindowSystem_RecreatedWindowWithSameName_ReceivesMinimizeButton()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws1 = new WindowSystem("TestSystem1");
+        var win1 = new DummyWindow("RecreatedWindow");
+        ws1.AddWindow(win1);
+        tracker.TrackWindowSystem(ws1);
+
+        Assert.Single(win1.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, win1.TitleBarButtons.First().Icon);
+
+        // A new window instance with the same name is created (e.g. after plugin reloads or re-instantiates window)
+        var ws2 = new WindowSystem("TestSystem2");
+        var win2 = new DummyWindow("RecreatedWindow");
+        ws2.AddWindow(win2);
+        Assert.Empty(win2.TitleBarButtons);
+
+        tracker.TrackWindowSystem(ws2);
+
+        Assert.Single(win2.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, win2.TitleBarButtons.First().Icon);
     }
 
     [Fact]
