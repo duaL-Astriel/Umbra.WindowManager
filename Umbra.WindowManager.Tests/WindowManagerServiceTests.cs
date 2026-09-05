@@ -199,6 +199,33 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_RegisterDockGroup_ReusesGroupWhenUnchanged()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab 1") { IsOpen = true };
+        var win2 = new DummyWindow("Tab 2") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+
+        service.RegisterDockGroup("dock_reuse", "Tab 1", new[] { tw1, tw2 });
+        var first = service.PeekDockGroup("dock_reuse");
+        Assert.NotNull(first);
+
+        // Same members + active tab must not allocate a new DockGroup every frame (issue #6).
+        service.RegisterDockGroup("dock_reuse", "Tab 1", new[] { tw1, tw2 });
+        Assert.Same(first, service.PeekDockGroup("dock_reuse"));
+
+        // A changed active tab replaces the group.
+        service.RegisterDockGroup("dock_reuse", "Tab 2", new[] { tw1, tw2 });
+        var second = service.PeekDockGroup("dock_reuse");
+        Assert.NotSame(first, second);
+
+        // A changed member set replaces the group.
+        service.RegisterDockGroup("dock_reuse", "Tab 2", new[] { tw1 });
+        Assert.NotSame(second, service.PeekDockGroup("dock_reuse"));
+    }
+
+    [Fact]
     public void WindowManagerService_OnWindowsChanged_FiresOnMutations()
     {
         var service = new WindowManagerService();

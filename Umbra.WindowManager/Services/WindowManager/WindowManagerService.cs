@@ -163,11 +163,27 @@ public class WindowManagerService
         this.OnWindowsChanged?.Invoke();
     }
 
-    public void RegisterDockGroup(string groupKey, string activeWindowName, IEnumerable<TrackedWindow> members)
+    /// <summary>
+    /// Registers (or refreshes) a dock group. This is called from the per-frame draw loop, so it is
+    /// idempotent: if a group with the same key, active tab, and exact member set already exists, no new
+    /// <see cref="DockGroup"/> is allocated. This keeps the draw loop allocation-free while a dock group
+    /// is on screen (see issue #6).
+    /// </summary>
+    public void RegisterDockGroup(string groupKey, string activeWindowName, IReadOnlyList<TrackedWindow> members)
     {
-        var group = new DockGroup(groupKey, activeWindowName, members);
-        this.dockGroups[groupKey] = group;
+        if (this.dockGroups.TryGetValue(groupKey, out var existing)
+            && existing.ActiveWindowName == activeWindowName
+            && MembersEqual(existing.Members, members))
+        {
+            return;
+        }
+
+        this.dockGroups[groupKey] = new DockGroup(groupKey, activeWindowName, members);
     }
+
+    /// <summary>Test/diagnostic accessor for the currently registered dock group, if any.</summary>
+    internal DockGroup? PeekDockGroup(string groupKey) =>
+        this.dockGroups.TryGetValue(groupKey, out var group) ? group : null;
 
     public void RemoveDockGroup(string groupKey)
     {
@@ -179,5 +195,19 @@ public class WindowManagerService
                     member.DockGroupKey = null;
             }
         }
+    }
+
+    private static bool MembersEqual(IReadOnlyList<TrackedWindow> a, IReadOnlyList<TrackedWindow> b)
+    {
+        if (a.Count != b.Count) return false;
+
+        for (var i = 0; i < a.Count; i++)
+        {
+            // Reference equality is intentional: the monitor emits members in a stable order, and a
+            // re-instantiated window produces a fresh TrackedWindow instance that must force a refresh.
+            if (!ReferenceEquals(a[i], b[i])) return false;
+        }
+
+        return true;
     }
 }
