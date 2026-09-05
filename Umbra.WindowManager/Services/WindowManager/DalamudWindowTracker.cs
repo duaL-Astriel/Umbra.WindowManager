@@ -13,7 +13,6 @@ namespace Umbra.WindowManager.Services.WindowManager;
 public class DalamudWindowTracker
 {
     private readonly WindowManagerService windowManagerService;
-    private readonly HashSet<string> injectedWindowNames = [];
 
     public DalamudWindowTracker(WindowManagerService windowManagerService)
     {
@@ -23,6 +22,9 @@ public class DalamudWindowTracker
 
     public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
     {
+        if (window.TitleBarButtons == null)
+            return;
+
         if (window.TitleBarButtons.Any(b => b.Icon == FontAwesomeIcon.WindowMinimize))
             return;
 
@@ -143,10 +145,7 @@ public class DalamudWindowTracker
         {
             if (string.IsNullOrWhiteSpace(window.WindowName)) continue;
             var tw = this.windowManagerService.RegisterWindow(window);
-            if (this.injectedWindowNames.Add(window.WindowName))
-            {
-                InjectMinimizeButton(window, tw, this.windowManagerService);
-            }
+            InjectMinimizeButton(window, tw, this.windowManagerService);
         }
     }
 }
