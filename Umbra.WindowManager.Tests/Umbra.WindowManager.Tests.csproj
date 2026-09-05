@@ -39,5 +39,15 @@
             <HintPath>$(UmbraLibPath)Umbra.Common.dll</HintPath>
             <Private>true</Private>
         </Reference>
+        <Reference Include="Una.Drawing">
+            <HintPath>$(UmbraLibPath)Una.Drawing.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+    </ItemGroup>
+
+    <ItemGroup>
+        <None Include="$(UmbraLibPath)runtimes\win-x64\native\libSkiaSharp.dll">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </None>
     </ItemGroup>
 </Project>
