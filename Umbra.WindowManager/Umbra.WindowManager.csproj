@@ -20,7 +20,11 @@
     </PropertyGroup>
 
     <PropertyGroup>
+        <!-- These assembly attributes are what Umbra's custom-plugin loader reads (via
+             PluginEntry.ReadAssemblyAttributes) to display the plugin in its list. -->
         <ProductName>Umbra Window Manager</ProductName>
+        <Product>Umbra Window Manager</Product>
+        <AssemblyTitle>Umbra Window Manager</AssemblyTitle>
         <Authors>Una</Authors>
         <Company>Una</Company>
         <Version>1.0.0.0</Version>
