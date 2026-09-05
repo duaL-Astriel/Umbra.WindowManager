@@ -60,7 +60,12 @@ public class WindowManagerWidget : ToolbarWidget
         get => this.HasConfigVariable("WindowManager.DisplayMode")
             ? this.GetConfigValue<string>("WindowManager.DisplayMode")
             : this.displayMode;
-        set => this.displayMode = value;
+        set
+        {
+            this.displayMode = value;
+            if (this.HasConfigVariable("WindowManager.DisplayMode"))
+                this.SetConfigValue("WindowManager.DisplayMode", value);
+        }
     }
 
     [ConfigVariable("WindowManager.MaxTitleWidth", "General", "Window Manager", min: 60, max: 300)]
@@ -69,7 +74,12 @@ public class WindowManagerWidget : ToolbarWidget
         get => this.HasConfigVariable("WindowManager.MaxTitleWidth")
             ? this.GetConfigValue<int>("WindowManager.MaxTitleWidth")
             : this.maxTitleWidth;
-        set => this.maxTitleWidth = value;
+        set
+        {
+            this.maxTitleWidth = value;
+            if (this.HasConfigVariable("WindowManager.MaxTitleWidth"))
+                this.SetConfigValue("WindowManager.MaxTitleWidth", value);
+        }
     }
 
     [ConfigVariable("WindowManager.GroupDockedTabs", "General", "Window Manager")]
@@ -78,7 +88,12 @@ public class WindowManagerWidget : ToolbarWidget
         get => this.HasConfigVariable("WindowManager.GroupDockedTabs")
             ? this.GetConfigValue<bool>("WindowManager.GroupDockedTabs")
             : this.groupDockedTabs;
-        set => this.groupDockedTabs = value;
+        set
+        {
+            this.groupDockedTabs = value;
+            if (this.HasConfigVariable("WindowManager.GroupDockedTabs"))
+                this.SetConfigValue("WindowManager.GroupDockedTabs", value);
+        }
     }
 
     protected override void Initialize()
@@ -167,10 +182,7 @@ public class WindowManagerWidget : ToolbarWidget
             btnNode.ToggleClass("active", window.IsFocused);
             btnNode.ToggleClass("open", window.IsOpen);
             btnNode.ToggleClass("minimized", window.IsMinimized);
-            if (window.DockGroupKey != null)
-            {
-                btnNode.ToggleClass("dock-group", true);
-            }
+            btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
 
             btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
             btnNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? this.MaxTitleWidth : null;
