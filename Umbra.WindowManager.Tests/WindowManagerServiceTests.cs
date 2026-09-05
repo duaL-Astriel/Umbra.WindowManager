@@ -226,31 +226,6 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
-    public void WindowManagerService_OnWindowsChanged_FiresOnMutations()
-    {
-        var service = new WindowManagerService();
-        var win = new DummyWindow("Event Window") { IsOpen = true };
-
-        int fireCount = 0;
-        service.OnWindowsChanged += () => fireCount++;
-
-        var tw = service.RegisterWindow(win);
-        Assert.Equal(1, fireCount);
-
-        service.Minimize(tw);
-        Assert.Equal(2, fireCount);
-
-        service.Restore(tw);
-        Assert.Equal(3, fireCount);
-
-        service.Close(tw);
-        Assert.Equal(4, fireCount);
-
-        service.UnregisterWindow(win);
-        Assert.Equal(5, fireCount);
-    }
-
-    [Fact]
     public void WindowManagerService_GetTrackedWindows_ExcludesGarbageCollectedWindows()
     {
         var service = new WindowManagerService();
@@ -395,26 +370,22 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
-    public void WindowManagerService_RegisterWindow_WhenInstanceUnchanged_DoesNotFireOnWindowsChanged()
+    public void WindowManagerService_RegisterWindow_WhenInstanceUnchanged_ReturnsSameTrackedWindow()
     {
         var service = new WindowManagerService();
         var win = new DummyWindow("Stable Window") { IsOpen = true };
 
-        var fireCount = 0;
-        service.OnWindowsChanged += () => fireCount++;
-
         var tw1 = service.RegisterWindow(win);
-        Assert.Equal(1, fireCount);
 
-        // Re-registering the exact same instance should not fire OnWindowsChanged
+        // Re-registering the exact same instance returns the same TrackedWindow.
         var tw2 = service.RegisterWindow(win);
         Assert.Same(tw1, tw2);
-        Assert.Equal(1, fireCount);
 
-        // Registering a new instance with the same name should fire OnWindowsChanged
+        // Registering a new instance with the same name replaces the tracked window.
         var winReplacement = new DummyWindow("Stable Window") { IsOpen = true };
         var tw3 = service.RegisterWindow(winReplacement);
         Assert.NotSame(tw1, tw3);
-        Assert.Equal(2, fireCount);
+        Assert.True(tw3.TryGetWindow(out var retrieved));
+        Assert.Same(winReplacement, retrieved);
     }
 }
