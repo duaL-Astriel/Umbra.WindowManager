@@ -149,6 +149,23 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_MinimizedWindowWithOnlyId_IsRetained()
+    {
+        var service = new WindowManagerService();
+        var winOnlyId = new DummyWindow("###orchestrion_miniplayer") { IsOpen = true };
+        var tw = service.RegisterWindow(winOnlyId);
+
+        // Open window with no clean title is ignored (overlay behavior)
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.DoesNotContain(tw, visible);
+
+        // But once minimized, it must be retained so the user can restore it
+        service.Minimize(tw);
+        visible = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(tw, visible);
+    }
+
+    [Fact]
     public void WindowManagerService_DockGroup_MinimizeAndRestore_AffectsAllGroupMembers()
     {
         var service = new WindowManagerService();
