@@ -47,6 +47,31 @@ public class DalamudWindowTracker
         if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
             return;
 
+        // Clean up any duplicate minimize buttons accumulated across assembly hot-reloads
+        TitleBarButton? existingInList = null;
+        for (var i = window.TitleBarButtons.Count - 1; i >= 0; i--)
+        {
+            var b = window.TitleBarButtons[i];
+            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority == int.MaxValue - 1)
+            {
+                if (existingInList == null)
+                {
+                    existingInList = b;
+                }
+                else
+                {
+                    window.TitleBarButtons.RemoveAt(i);
+                }
+            }
+        }
+
+        if (existingInList != null)
+        {
+            existingInList.Click = _ => service.Minimize(tracked);
+            InjectedButtons.AddOrUpdate(window, existingInList);
+            return;
+        }
+
         var button = new TitleBarButton
         {
             Icon = FontAwesomeIcon.WindowMinimize,
