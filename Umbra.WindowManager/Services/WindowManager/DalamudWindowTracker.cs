@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Umbra.Common;
@@ -13,6 +14,14 @@ namespace Umbra.WindowManager.Services.WindowManager;
 public class DalamudWindowTracker
 {
     private readonly WindowManagerService windowManagerService;
+
+    // Marks the minimize button we injected, keyed by the window *instance*. Entries disappear
+    // automatically once a window is garbage collected, so re-instantiated windows are re-injected.
+    private static readonly ConditionalWeakTable<IWindow, TitleBarButton> InjectedButtons = new();
+
+    // Throttles the reflection-failure log so a persistent Dalamud API break logs ~once/minute
+    // instead of every 2-second tick.
+    private int scanFailLogCounter;
 
     public DalamudWindowTracker(WindowManagerService windowManagerService)
     {
@@ -25,10 +34,13 @@ public class DalamudWindowTracker
         if (window.TitleBarButtons == null)
             return;
 
-        if (window.TitleBarButtons.Any(b => b.Icon == FontAwesomeIcon.WindowMinimize))
+        // Idempotent per window *instance* rather than per icon: a plugin may ship its own
+        // WindowMinimize button, and we must still inject (and stay bound to) our own. Matching on
+        // icon alone would skip injection and leave our minimize action unwired (issue #8.1).
+        if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
             return;
 
-        window.TitleBarButtons.Add(new TitleBarButton
+        var button = new TitleBarButton
         {
             Icon = FontAwesomeIcon.WindowMinimize,
             Priority = int.MaxValue - 1,
@@ -38,7 +50,10 @@ public class DalamudWindowTracker
                 if (Dalamud.Bindings.ImGui.ImGui.IsItemHovered())
                     Dalamud.Bindings.ImGui.ImGui.SetTooltip("Minimize to Umbra Toolbar");
             }
-        });
+        };
+
+        window.TitleBarButtons.Add(button);
+        InjectedButtons.AddOrUpdate(window, button);
     }
 
     [OnTick(interval: 2000)]
@@ -95,9 +110,13 @@ public class DalamudWindowTracker
                 this.ScanObjectForWindowSystems(pluginObj);
             }
         }
-        catch
+        catch (Exception ex)
         {
-            // Defensive: logging or ignore reflection errors
+            // Reflection into Dalamud internals can break across Dalamud updates (renamed
+            // Service`1 / instanceTcs / PluginManager / ServiceContainer). Surface it, throttled,
+            // instead of failing silently so discovery breakage is diagnosable (issue #8.2).
+            if (this.scanFailLogCounter++ % 30 == 0)
+                Logger.Warning($"[WindowManager] Plugin discovery scan failed via reflection: {ex.GetType().Name}: {ex.Message}");
         }
     }
 
