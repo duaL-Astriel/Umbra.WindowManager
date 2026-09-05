@@ -18,6 +18,7 @@ public class WindowManagerWidget : ToolbarWidget
     private readonly WindowManagerService windowManager;
     private readonly Node rootNode;
     private readonly Dictionary<string, Node> windowNodes = [];
+    private readonly Dictionary<string, MenuPopup.Button> dropdownButtons = [];
     private readonly Dictionary<string, TrackedWindow> currentWindows = [];
     private readonly List<TrackedWindow> windowsBuffer = [];
     private readonly HashSet<string> currentNames = [];
@@ -67,6 +68,7 @@ public class WindowManagerWidget : ToolbarWidget
         this.DisplayMode == "Dropdown" || this.effectiveMode == "Dropdown" ? this.EnsureMenuPopup() : null;
 
     public IReadOnlyDictionary<string, Node> WindowNodes => this.windowNodes;
+    public IReadOnlyDictionary<string, MenuPopup.Button> DropdownButtons => this.dropdownButtons;
 
     [ConfigVariable("WindowManager.DisplayMode", "General", "Window Manager", options: ["Auto", "Taskbar", "IconOnly", "Dropdown"])]
     public string DisplayMode
@@ -239,6 +241,12 @@ public class WindowManagerWidget : ToolbarWidget
         if (this.dropdownNode is { } dn && dn.ParentNode == this.rootNode)
             this.rootNode.RemoveChild(dn, false);
 
+        if (this.menuPopup is { } mp)
+        {
+            mp.Clear(true);
+            this.dropdownButtons.Clear();
+        }
+
         this.layout = "buttons";
     }
 
@@ -321,14 +329,15 @@ public class WindowManagerWidget : ToolbarWidget
         btnNode.ToggleClass("minimized", window.IsMinimized);
         btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
 
+        var title = window.DisplayTitle;
         btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
-        btnNode.Tooltip = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+        btnNode.Tooltip = $"{title}{(window.IsMinimized ? " [Minimized]" : "")}";
 
         ApplyIcon(btnNode.ChildNodes[0], window);
 
         var labelNode = btnNode.ChildNodes[1];
-        if (!Equals(labelNode.NodeValue, window.CleanTitle))
-            labelNode.NodeValue = window.CleanTitle;
+        if (!Equals(labelNode.NodeValue, title))
+            labelNode.NodeValue = title;
         labelNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? (float)this.MaxTitleWidth : null;
         labelNode.Style.IsVisible = showLabel;
     }
@@ -347,7 +356,7 @@ public class WindowManagerWidget : ToolbarWidget
             if (iconNode.Style.ImageBytes != null)
                 iconNode.Style.ImageBytes = null;
 
-            var monogram = GetMonogram(window.CleanTitle);
+            var monogram = GetMonogram(window.DisplayTitle);
             if (!Equals(iconNode.NodeValue, monogram))
                 iconNode.NodeValue = monogram;
         }
@@ -406,23 +415,45 @@ public class WindowManagerWidget : ToolbarWidget
     private void RenderDropdown()
     {
         var popup = this.EnsureMenuPopup();
-        popup.Clear(true);
+
+        this.toRemove.Clear();
+        foreach (var name in this.dropdownButtons.Keys)
+        {
+            if (!this.currentNames.Contains(name))
+                this.toRemove.Add(name);
+        }
+
+        for (var i = 0; i < this.toRemove.Count; i++)
+        {
+            var name = this.toRemove[i];
+            if (this.dropdownButtons.Remove(name, out var btn))
+                popup.Remove(btn, true);
+        }
 
         for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
             var window = this.windowsBuffer[i];
             var windowName = window.WindowName;
-            var label = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+            var label = $"{window.DisplayTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
 
-            popup.Add(new MenuPopup.Button(label)
+            if (!this.dropdownButtons.TryGetValue(windowName, out var btn))
             {
-                Id = windowName,
-                OnClick = () =>
+                btn = new MenuPopup.Button(label)
                 {
-                    if (this.currentWindows.TryGetValue(windowName, out var w))
-                        this.windowManager.Toggle(w);
-                }
-            });
+                    OnClick = () =>
+                    {
+                        if (this.currentWindows.TryGetValue(windowName, out var w))
+                            this.windowManager.Toggle(w);
+                    }
+                };
+                popup.Add(btn);
+                this.dropdownButtons[windowName] = btn;
+            }
+
+            if (!Equals(btn.Label, label))
+                btn.Label = label;
+
+            btn.SortIndex = i;
         }
 
         if (this.dropdownNode is { } dn)
