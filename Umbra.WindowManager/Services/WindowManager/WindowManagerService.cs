@@ -15,38 +15,98 @@ public class WindowManagerService
 
     public event Action? OnWindowsChanged;
 
+    public void GetTrackedWindows(List<TrackedWindow> destination)
+    {
+        destination.Clear();
+        foreach (var (key, w) in this.windows)
+        {
+            if (w.TryGetWindow(out _))
+                destination.Add(w);
+            else
+                this.windows.TryRemove(key, out _);
+        }
+    }
+
+    public void GetVisibleAndMinimizedWindows(List<TrackedWindow> destination)
+    {
+        destination.Clear();
+        foreach (var (key, w) in this.windows)
+        {
+            if (w.TryGetWindow(out _))
+            {
+                if ((w.IsOpen || w.IsMinimized) && !string.IsNullOrWhiteSpace(w.CleanTitle))
+                    destination.Add(w);
+            }
+            else
+            {
+                this.windows.TryRemove(key, out _);
+            }
+        }
+    }
+
     public IReadOnlyList<TrackedWindow> GetTrackedWindows()
     {
-        return this.windows.Values
-            .Where(w => w.TryGetWindow(out _))
-            .ToList();
+        var destination = new List<TrackedWindow>();
+        this.GetTrackedWindows(destination);
+        return destination;
     }
 
     public IReadOnlyList<TrackedWindow> GetVisibleAndMinimizedWindows()
     {
-        return this.windows.Values
-            .Where(w => w.TryGetWindow(out _) && (w.IsOpen || w.IsMinimized) && !string.IsNullOrWhiteSpace(w.CleanTitle))
-            .ToList();
+        var destination = new List<TrackedWindow>();
+        this.GetVisibleAndMinimizedWindows(destination);
+        return destination;
     }
 
     public IReadOnlyList<TrackedWindow> GetActiveAndMinimizedWindows() => this.GetVisibleAndMinimizedWindows();
+    public void GetActiveAndMinimizedWindows(List<TrackedWindow> destination) => this.GetVisibleAndMinimizedWindows(destination);
+
+    public void PruneDeadWindows()
+    {
+        foreach (var (key, tw) in this.windows)
+        {
+            if (!tw.TryGetWindow(out _))
+                this.windows.TryRemove(key, out _);
+        }
+    }
 
     public TrackedWindow RegisterWindow(IWindow window)
     {
+        this.PruneDeadWindows();
+
+        var changed = false;
         var tw = this.windows.AddOrUpdate(
             window.WindowName,
-            _ => new TrackedWindow(window),
-            (_, existing) => existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window)
-                ? existing
-                : new TrackedWindow(window));
-        this.OnWindowsChanged?.Invoke();
+            _ =>
+            {
+                changed = true;
+                return new TrackedWindow(window);
+            },
+            (_, existing) =>
+            {
+                if (existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window))
+                {
+                    return existing;
+                }
+
+                changed = true;
+                return new TrackedWindow(window);
+            });
+
+        if (changed)
+        {
+            this.OnWindowsChanged?.Invoke();
+        }
+
         return tw;
     }
 
     public void UnregisterWindow(IWindow window)
     {
-        this.windows.TryRemove(window.WindowName, out _);
-        this.OnWindowsChanged?.Invoke();
+        if (this.windows.TryRemove(window.WindowName, out _))
+        {
+            this.OnWindowsChanged?.Invoke();
+        }
     }
 
     public void Minimize(TrackedWindow tracked)

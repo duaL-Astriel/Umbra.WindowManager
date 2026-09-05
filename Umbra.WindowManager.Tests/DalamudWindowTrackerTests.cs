@@ -172,4 +172,48 @@ public class DalamudWindowTrackerTests
         Assert.Contains(tracked, t => t.WindowName == "PropWindow");
         Assert.Contains(tracked, t => t.WindowName == "FieldWindow");
     }
+
+    private class BasePluginWithWindowSystem
+    {
+        private readonly WindowSystem basePrivateWs;
+
+        public BasePluginWithWindowSystem(WindowSystem ws)
+        {
+            this.basePrivateWs = ws;
+        }
+    }
+
+    private class DerivedPluginWithWindowSystem : BasePluginWithWindowSystem
+    {
+        private readonly WindowSystem derivedPrivateWs;
+
+        public DerivedPluginWithWindowSystem(WindowSystem baseWs, WindowSystem derivedWs) : base(baseWs)
+        {
+            this.derivedPrivateWs = derivedWs;
+        }
+    }
+
+    [Fact]
+    public void ScanObjectForWindowSystems_TraversesBaseClassHierarchy()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var baseWs = new WindowSystem("BaseSys");
+        baseWs.AddWindow(new DummyWindow("BaseClassWindow"));
+
+        var derivedWs = new WindowSystem("DerivedSys");
+        derivedWs.AddWindow(new DummyWindow("DerivedClassWindow"));
+
+        var derivedPlugin = new DerivedPluginWithWindowSystem(baseWs, derivedWs);
+
+        var scanMethod = typeof(DalamudWindowTracker).GetMethod("ScanObjectForWindowSystems", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(scanMethod);
+        scanMethod.Invoke(tracker, new object[] { derivedPlugin });
+
+        var tracked = service.GetTrackedWindows();
+        Assert.Equal(2, tracked.Count);
+        Assert.Contains(tracked, t => t.WindowName == "BaseClassWindow");
+        Assert.Contains(tracked, t => t.WindowName == "DerivedClassWindow");
+    }
 }

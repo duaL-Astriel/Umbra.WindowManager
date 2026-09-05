@@ -17,6 +17,9 @@ public class WindowManagerWidget : ToolbarWidget
     private readonly WindowManagerService windowManager;
     private readonly Node rootNode;
     private readonly Dictionary<string, Node> windowNodes = [];
+    private readonly List<TrackedWindow> windowsBuffer = [];
+    private readonly HashSet<string> currentNames = [];
+    private readonly List<string> toRemove = [];
 
     private string displayMode = "Auto";
     private int maxTitleWidth = 140;
@@ -142,22 +145,37 @@ public class WindowManagerWidget : ToolbarWidget
 
     public void UpdateButtons()
     {
-        var windows = this.windowManager.GetVisibleAndMinimizedWindows();
-        var currentNames = new HashSet<string>(windows.Select(w => w.WindowName));
+        this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
+
+        this.currentNames.Clear();
+        for (var i = 0; i < this.windowsBuffer.Count; i++)
+        {
+            this.currentNames.Add(this.windowsBuffer[i].WindowName);
+        }
 
         // Remove old nodes
-        foreach (var (name, node) in this.windowNodes.ToList())
+        this.toRemove.Clear();
+        foreach (var name in this.windowNodes.Keys)
         {
-            if (!currentNames.Contains(name))
+            if (!this.currentNames.Contains(name))
+            {
+                this.toRemove.Add(name);
+            }
+        }
+
+        for (var i = 0; i < this.toRemove.Count; i++)
+        {
+            var name = this.toRemove[i];
+            if (this.windowNodes.Remove(name, out var node))
             {
                 this.rootNode.RemoveChild(node, true);
-                this.windowNodes.Remove(name);
             }
         }
 
         // Add or update nodes
-        foreach (var window in windows)
+        for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
+            var window = this.windowsBuffer[i];
             if (!this.windowNodes.TryGetValue(window.WindowName, out var btnNode))
             {
                 btnNode = new Node

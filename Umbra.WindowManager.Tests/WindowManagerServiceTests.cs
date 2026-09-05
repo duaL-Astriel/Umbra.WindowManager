@@ -309,4 +309,85 @@ public class WindowManagerServiceTests
         Assert.Null(tw1.DockGroupKey);
         Assert.Null(tw2.DockGroupKey);
     }
+
+    [Fact]
+    public void WindowManagerService_ZeroAllocOverloads_PopulateProvidedLists()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Window 1") { IsOpen = true };
+        var win2 = new DummyWindow("Window 2") { IsOpen = false };
+        var win3 = new DummyWindow("Window 3") { IsOpen = false };
+
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+        var tw3 = service.RegisterWindow(win3);
+        service.Minimize(tw2);
+
+        var trackedBuffer = new List<TrackedWindow> { tw1 };
+        service.GetTrackedWindows(trackedBuffer);
+        Assert.Equal(3, trackedBuffer.Count);
+
+        var visibleBuffer = new List<TrackedWindow>();
+        service.GetVisibleAndMinimizedWindows(visibleBuffer);
+        Assert.Equal(2, visibleBuffer.Count);
+        Assert.Contains(visibleBuffer, w => w.WindowName == "Window 1");
+        Assert.Contains(visibleBuffer, w => w.WindowName == "Window 2");
+        Assert.DoesNotContain(visibleBuffer, w => w.WindowName == "Window 3");
+
+        var activeBuffer = new List<TrackedWindow>();
+        service.GetActiveAndMinimizedWindows(activeBuffer);
+        Assert.Equal(2, activeBuffer.Count);
+    }
+
+    [Fact]
+    public void WindowManagerService_PruneDeadWindows_RemovesGarbageCollectedWindowsFromDictionary()
+    {
+        var service = new WindowManagerService();
+
+        Func<TrackedWindow> registerWindow = () =>
+        {
+            var win = new DummyWindow("Temporary Window to Prune");
+            return service.RegisterWindow(win);
+        };
+
+        var tw = registerWindow();
+        var buffer = new List<TrackedWindow>();
+        service.GetTrackedWindows(buffer);
+        Assert.Single(buffer);
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        Assert.False(tw.TryGetWindow(out _));
+
+        service.PruneDeadWindows();
+
+        service.GetTrackedWindows(buffer);
+        Assert.Empty(buffer);
+    }
+
+    [Fact]
+    public void WindowManagerService_RegisterWindow_WhenInstanceUnchanged_DoesNotFireOnWindowsChanged()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Stable Window") { IsOpen = true };
+
+        var fireCount = 0;
+        service.OnWindowsChanged += () => fireCount++;
+
+        var tw1 = service.RegisterWindow(win);
+        Assert.Equal(1, fireCount);
+
+        // Re-registering the exact same instance should not fire OnWindowsChanged
+        var tw2 = service.RegisterWindow(win);
+        Assert.Same(tw1, tw2);
+        Assert.Equal(1, fireCount);
+
+        // Registering a new instance with the same name should fire OnWindowsChanged
+        var winReplacement = new DummyWindow("Stable Window") { IsOpen = true };
+        var tw3 = service.RegisterWindow(winReplacement);
+        Assert.NotSame(tw1, tw3);
+        Assert.Equal(2, fireCount);
+    }
 }

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using Dalamud.Interface.Windowing;
 
 namespace Umbra.WindowManager.Services.WindowManager;
@@ -12,17 +13,18 @@ public class TrackedWindow
         this.windowRef = new WeakReference<IWindow>(window);
         this.WindowName = window.WindowName;
         this.CleanTitle = WindowInfoHelper.GetCleanTitle(window.WindowName);
+        this.Id = WindowInfoHelper.GetWindowId(window.WindowName);
         this.Namespace = window.Namespace ?? string.Empty;
     }
 
     public string WindowName { get; }
     public string CleanTitle { get; }
-    public string Id => WindowInfoHelper.GetWindowId(this.WindowName);
+    public string Id { get; }
     public string Namespace { get; set; }
     public bool IsMinimized { get; set; }
     public string? DockGroupKey { get; set; }
 
-    public bool TryGetWindow(out IWindow window) => this.windowRef.TryGetTarget(out window!);
+    public bool TryGetWindow([NotNullWhen(true)] out IWindow? window) => this.windowRef.TryGetTarget(out window);
 
     public bool IsOpen
     {

@@ -14,7 +14,7 @@ Umbra Window Manager is a first-class taskbar and window manager plugin for the 
 3. **ImGui Collapse Interception**: Intercepts native ImGui window collapse triggers (title bar double-clicks and collapse buttons), immediately uncollapsing them and directing them into full toolbar minimizes.
 4. **Dock Group Management**: Discovers multi-window tab groups sharing an `ImGuiDockNodePtr`. Synchronizes their minimize and restore actions so the entire tab stack disappears and reappears as a unified unit, preserving active tab focus.
 5. **Memory Safety**: Uses `WeakReference<IWindow>` throughout all internal caches to prevent memory retention or obstruction of plugin hot-reloads.
-6. **Zero Warnings & Full Test Coverage**: Compiles under .NET 10 (`net10.0-windows`) with 0 warnings, 0 errors, and 100% pass rate across 58 automated xUnit tests.
+6. **Zero Warnings & Full Test Coverage**: Compiles under .NET 10 (`net10.0-windows`) with 0 warnings, 0 errors, and 100% pass rate across 62 automated xUnit tests.
 
 ---
 
@@ -146,18 +146,18 @@ ImGui windows typically encode unique identifiers using `##` (name override) or 
 ### Test Suite Execution
 - Command: `dotnet test`
 - Framework: xUnit with .NET 10.0 runtime
-- Results: **58 Passed, 0 Failed, 0 Skipped** (Total Duration: 49 ms)
+- Results: **62 Passed, 0 Failed, 0 Skipped** (Total Duration: ~49 ms)
 
 ### Test Class Breakdown
 
 ```text
 Test Suite Summary:
-├── WindowInfoHelperTests (6 tests)
-│   ├── GetCleanTitle_StripsImGuiIdentifiers
-│   ├── GetCleanTitle_NullOrWhitespace_ReturnsEmpty
-│   ├── GetWindowId_ExtractsIdentifierOrFallback
-│   └── GetWindowId_NullOrWhitespace_ReturnsEmpty
-├── DockGroupTests (8 tests)
+├── WindowInfoHelperTests (15 tests across 4 theories)
+│   ├── GetCleanTitle_StripsImGuiIdentifiers (5 cases)
+│   ├── GetCleanTitle_NullOrWhitespace_ReturnsEmpty (3 cases)
+│   ├── GetWindowId_ExtractsIdentifierOrFallback (4 cases)
+│   └── GetWindowId_NullOrWhitespace_ReturnsEmpty (3 cases)
+├── DockGroupTests (10 tests)
 │   ├── DockGroup_MinimizeAll_HidesAllMembers
 │   ├── DockGroup_RestoreAll_OpensAllMembersAndRestoresActiveTab
 │   ├── TrackedWindow_Properties_InitializedCorrectly
@@ -168,7 +168,7 @@ Test Suite Summary:
 │   ├── DockGroup_Constructor_SetsDockGroupKeyOnMembers
 │   ├── DockGroup_Restore_FallbackToFirstMemberIfActiveNotFound
 │   └── DockGroup_EmptyMembers_MinimizeAndRestoreDoNotThrow
-├── WindowManagerServiceTests (12 tests)
+├── WindowManagerServiceTests (17 tests)
 │   ├── WindowManagerService_SingleWindow_Lifecycle
 │   ├── WindowManagerService_Toggle_InvertsState
 │   ├── WindowManagerService_Toggle_OpenAndNotFocused_BringsToFront
@@ -182,15 +182,19 @@ Test Suite Summary:
 │   ├── WindowManagerService_GetTrackedWindows_ExcludesGarbageCollectedWindows
 │   ├── WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesGarbageCollectedMinimizedWindows
 │   ├── WindowManagerService_RegisterWindow_WhenWindowReinstantiated_ReplacesStaleTrackedWindow
-│   └── WindowManagerService_RemoveDockGroup_ClearsDockGroupKeyOnMembers
-├── DalamudWindowTrackerTests (7 tests)
+│   ├── WindowManagerService_RemoveDockGroup_ClearsDockGroupKeyOnMembers
+│   ├── WindowManagerService_ZeroAllocOverloads_PopulateProvidedLists
+│   ├── WindowManagerService_PruneDeadWindows_RemovesGarbageCollectedWindowsFromDictionary
+│   └── WindowManagerService_RegisterWindow_WhenInstanceUnchanged_DoesNotFireOnWindowsChanged
+├── DalamudWindowTrackerTests (8 tests)
 │   ├── InjectMinimizeButton_AddsButtonOnceAndBindsClick
 │   ├── InjectMinimizeButton_NullTitleBarButtons_DoesNotThrow
 │   ├── TrackWindowSystem_RegistersWindowsAndInjectsButtons
 │   ├── TrackWindowSystem_RecreatedWindowWithSameName_ReceivesMinimizeButton
 │   ├── TrackWindowSystem_SkipsEmptyOrWhitespaceWindowNames
 │   ├── ScanPlugins_DoesNotThrow_WhenPluginManagerNotAvailable
-│   └── ScanObjectForWindowSystems_DiscoversWindowSystemsInPropertiesAndFields
+│   ├── ScanObjectForWindowSystems_DiscoversWindowSystemsInPropertiesAndFields
+│   └── ScanObjectForWindowSystems_TraversesBaseClassHierarchy
 └── WindowManagerWidgetTests (12 tests)
     ├── Constructor_InitializesRootNodeWithExpectedStyles
     ├── UpdateButtons_CreatesButtonForOpenWindow
