@@ -60,6 +60,24 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
+    public void TrackWindowSystem_WithPluginContext_SetsPluginNameAndIcon()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("IconSys");
+        var win = new DummyWindow("IconWindow");
+        ws.AddWindow(win);
+
+        var iconBytes = new byte[] { 1, 2, 3 };
+        tracker.TrackWindowSystem(ws, "MyPlugin", iconBytes);
+
+        var tw = service.GetTrackedWindows().Single(t => t.WindowName == "IconWindow");
+        Assert.Equal("MyPlugin", tw.PluginInternalName);
+        Assert.Same(iconBytes, tw.IconBytes);
+    }
+
+    [Fact]
     public void InjectMinimizeButton_NullTitleBarButtons_DoesNotThrow()
     {
         var win = new DummyWindow("NullButtons");
