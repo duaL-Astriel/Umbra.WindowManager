@@ -1,7 +1,6 @@
 // Umbra.WindowManager/Services/WindowManager/ImGuiContextMonitor.cs
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using Dalamud.Bindings.ImGui;
 using Umbra.Common;
 
@@ -11,6 +10,10 @@ namespace Umbra.WindowManager.Services.WindowManager;
 public class ImGuiContextMonitor
 {
     private readonly WindowManagerService windowManager;
+    private readonly Dictionary<string, TrackedWindow> trackedMap = new();
+    private readonly Dictionary<uint, List<TrackedWindow>> dockGroups = new();
+    private readonly Dictionary<uint, string> dockActiveTab = new();
+    private readonly List<List<TrackedWindow>> listPool = new();
 
     public ImGuiContextMonitor(WindowManagerService windowManager)
     {
@@ -23,12 +26,20 @@ public class ImGuiContextMonitor
         var ctx = ImGui.GetCurrentContext();
         if (ctx.IsNull) return;
 
+        this.trackedMap.Clear();
         var trackedList = this.windowManager.GetTrackedWindows();
-        var trackedMap = trackedList.ToDictionary(t => t.WindowName, t => t);
+        foreach (var t in trackedList)
+        {
+            this.trackedMap[t.WindowName] = t;
+        }
 
-        // Group tracking dictionary: dockId -> list of windows in that dock
-        var dockGroups = new Dictionary<uint, List<TrackedWindow>>();
-        var dockActiveTab = new Dictionary<uint, string>();
+        foreach (var list in this.dockGroups.Values)
+        {
+            list.Clear();
+            this.listPool.Add(list);
+        }
+        this.dockGroups.Clear();
+        this.dockActiveTab.Clear();
 
         for (var i = 0; i < ctx.Windows.Size; i++)
         {
@@ -36,7 +47,7 @@ public class ImGuiContextMonitor
             if (win.IsNull) continue;
 
             var name = win.Name != null ? System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)win.Name) : null;
-            if (string.IsNullOrEmpty(name) || !trackedMap.TryGetValue(name, out var tracked))
+            if (string.IsNullOrEmpty(name) || !this.trackedMap.TryGetValue(name, out var tracked))
                 continue;
 
             // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
@@ -51,28 +62,45 @@ public class ImGuiContextMonitor
             if (win.DockIsActive && !win.DockNode.IsNull)
             {
                 var dockId = win.DockId;
-                if (!dockGroups.TryGetValue(dockId, out var groupMembers))
+                if (!this.dockGroups.TryGetValue(dockId, out var groupMembers))
                 {
-                    groupMembers = [];
-                    dockGroups[dockId] = groupMembers;
+                    groupMembers = this.GetPooledList();
+                    this.dockGroups[dockId] = groupMembers;
                 }
                 groupMembers.Add(tracked);
 
                 if (win.DockTabIsVisible)
                 {
-                    dockActiveTab[dockId] = name;
+                    this.dockActiveTab[dockId] = name;
                 }
+            }
+            else if (tracked.DockGroupKey != null)
+            {
+                tracked.DockGroupKey = null;
             }
         }
 
         // Register multi-window dock groups
-        foreach (var (dockId, members) in dockGroups)
+        foreach (var (dockId, members) in this.dockGroups)
         {
             if (members.Count > 1)
             {
-                var activeName = dockActiveTab.GetValueOrDefault(dockId, members[0].WindowName);
+                var activeName = this.dockActiveTab.GetValueOrDefault(dockId, members[0].WindowName);
                 this.windowManager.RegisterDockGroup($"dock_{dockId}", activeName, members);
             }
         }
+    }
+
+    private List<TrackedWindow> GetPooledList()
+    {
+        if (this.listPool.Count > 0)
+        {
+            var lastIndex = this.listPool.Count - 1;
+            var list = this.listPool[lastIndex];
+            this.listPool.RemoveAt(lastIndex);
+            return list;
+        }
+
+        return new List<TrackedWindow>();
     }
 }
