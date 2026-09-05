@@ -14,6 +14,7 @@ public class ImGuiContextMonitor
     private readonly Dictionary<uint, List<TrackedWindow>> dockGroups = new();
     private readonly Dictionary<uint, string> dockActiveTab = new();
     private readonly List<List<TrackedWindow>> listPool = new();
+    private readonly List<TrackedWindow> trackedBuffer = [];
 
     public ImGuiContextMonitor(WindowManagerService windowManager)
     {
@@ -27,9 +28,10 @@ public class ImGuiContextMonitor
         if (ctx.IsNull) return;
 
         this.trackedMap.Clear();
-        var trackedList = this.windowManager.GetTrackedWindows();
-        foreach (var t in trackedList)
+        this.windowManager.GetTrackedWindows(this.trackedBuffer);
+        for (var i = 0; i < this.trackedBuffer.Count; i++)
         {
+            var t = this.trackedBuffer[i];
             this.trackedMap[t.WindowName] = t;
         }
 
@@ -87,6 +89,11 @@ public class ImGuiContextMonitor
             {
                 var activeName = this.dockActiveTab.GetValueOrDefault(dockId, members[0].WindowName);
                 this.windowManager.RegisterDockGroup($"dock_{dockId}", activeName, members);
+            }
+            else if (members.Count == 1 && members[0].DockGroupKey != null)
+            {
+                this.windowManager.RemoveDockGroup($"dock_{dockId}");
+                members[0].DockGroupKey = null;
             }
         }
     }

@@ -103,38 +103,40 @@ public class DalamudWindowTracker
 
     private void ScanObjectForWindowSystems(object obj)
     {
-        var type = obj.GetType();
-        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
 
-        foreach (var prop in type.GetProperties(flags))
+        for (var currentType = obj.GetType(); currentType != null && currentType != typeof(object); currentType = currentType.BaseType)
         {
-            try
+            foreach (var prop in currentType.GetProperties(flags))
             {
-                if (prop.CanRead && prop.GetIndexParameters().Length == 0 && typeof(WindowSystem).IsAssignableFrom(prop.PropertyType))
+                try
                 {
-                    if (prop.GetValue(obj) is WindowSystem ws)
-                        this.TrackWindowSystem(ws);
+                    if (prop.CanRead && prop.GetIndexParameters().Length == 0 && typeof(WindowSystem).IsAssignableFrom(prop.PropertyType))
+                    {
+                        if (prop.GetValue(obj) is WindowSystem ws)
+                            this.TrackWindowSystem(ws);
+                    }
+                }
+                catch
+                {
+                    // Defensive against property getters throwing
                 }
             }
-            catch
-            {
-                // Defensive against property getters throwing
-            }
-        }
 
-        foreach (var field in type.GetFields(flags))
-        {
-            try
+            foreach (var field in currentType.GetFields(flags))
             {
-                if (typeof(WindowSystem).IsAssignableFrom(field.FieldType))
+                try
                 {
-                    if (field.GetValue(obj) is WindowSystem ws)
-                        this.TrackWindowSystem(ws);
+                    if (typeof(WindowSystem).IsAssignableFrom(field.FieldType))
+                    {
+                        if (field.GetValue(obj) is WindowSystem ws)
+                            this.TrackWindowSystem(ws);
+                    }
                 }
-            }
-            catch
-            {
-                // Defensive against field access issues
+                catch
+                {
+                    // Defensive against field access issues
+                }
             }
         }
     }
