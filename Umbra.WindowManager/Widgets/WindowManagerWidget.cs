@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Umbra.Common;
@@ -17,9 +18,15 @@ public class WindowManagerWidget : ToolbarWidget
     private readonly WindowManagerService windowManager;
     private readonly Node rootNode;
     private readonly Dictionary<string, Node> windowNodes = [];
+    private readonly Dictionary<string, TrackedWindow> currentWindows = [];
     private readonly List<TrackedWindow> windowsBuffer = [];
     private readonly HashSet<string> currentNames = [];
     private readonly List<string> toRemove = [];
+
+    private Node? dropdownNode;
+    private MenuPopup? menuPopup;
+    private string layout = "";
+    private string effectiveMode = "Taskbar";
 
     private string displayMode = "Auto";
     private int maxTitleWidth = 140;
@@ -53,7 +60,11 @@ public class WindowManagerWidget : ToolbarWidget
     }
 
     public override Node Node => this.rootNode;
-    public override WidgetPopup? Popup => null;
+
+    // Only the Dropdown presentation uses an Umbra popup; every other mode renders inline buttons and
+    // must expose a null popup so clicks aren't intercepted by the framework (issue #4).
+    public override WidgetPopup? Popup =>
+        this.DisplayMode == "Dropdown" || this.effectiveMode == "Dropdown" ? this.EnsureMenuPopup() : null;
 
     public IReadOnlyDictionary<string, Node> WindowNodes => this.windowNodes;
 
@@ -147,67 +158,313 @@ public class WindowManagerWidget : ToolbarWidget
     {
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
 
+        // Refresh the name -> current TrackedWindow map so click handlers always act on the live window
+        // instance, even after a plugin re-instantiates a same-named window (issue #2).
+        this.currentWindows.Clear();
         this.currentNames.Clear();
         for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
-            this.currentNames.Add(this.windowsBuffer[i].WindowName);
+            var w = this.windowsBuffer[i];
+            this.currentWindows[w.WindowName] = w;
+            this.currentNames.Add(w.WindowName);
         }
 
-        // Remove old nodes
+        this.effectiveMode = this.ResolveEffectiveMode(this.windowsBuffer.Count);
+
+        if (this.effectiveMode == "Dropdown")
+        {
+            this.SwitchToDropdownLayout();
+            this.RenderDropdown();
+        }
+        else
+        {
+            this.SwitchToButtonLayout();
+            this.RenderButtons(this.effectiveMode);
+        }
+    }
+
+    // --- Mode resolution ----------------------------------------------------------------------------
+
+    private string ResolveEffectiveMode(int count)
+    {
+        var mode = this.DisplayMode;
+        if (mode is "Taskbar" or "IconOnly" or "Dropdown") return mode;
+
+        // Auto: start as Taskbar and condense under width/count pressure.
+        var estimatedButtonWidth = this.MaxTitleWidth + 34f; // icon + padding + gap.
+        return ResolveAutoMode(count, estimatedButtonWidth, this.GetAvailableWidth());
+    }
+
+    /// <summary>
+    /// Pure decision for Auto mode: Taskbar while buttons fit, condensing to IconOnly then Dropdown as
+    /// the available toolbar width (or, when width is unknown, the window count) is exceeded.
+    /// </summary>
+    internal static string ResolveAutoMode(int windowCount, float estimatedButtonWidth, float availableWidth)
+    {
+        if (windowCount == 0) return "Taskbar";
+        if (windowCount > 12) return "Dropdown";
+
+        if (availableWidth > 0f)
+        {
+            if (windowCount * estimatedButtonWidth <= availableWidth) return "Taskbar";
+
+            const float iconOnlyButtonWidth = 32f;
+            if (windowCount * iconOnlyButtonWidth <= availableWidth) return "IconOnly";
+
+            return "Dropdown";
+        }
+
+        // Width unknown (e.g. before layout): fall back to a conservative count heuristic.
+        return windowCount <= 6 ? "Taskbar" : "IconOnly";
+    }
+
+    private float GetAvailableWidth()
+    {
+        try
+        {
+            return this.GetBarNode?.InnerWidth ?? 0f;
+        }
+        catch
+        {
+            return 0f;
+        }
+    }
+
+    // --- Inline button layout -----------------------------------------------------------------------
+
+    private void SwitchToButtonLayout()
+    {
+        if (this.layout == "buttons") return;
+
+        if (this.dropdownNode is { } dn && dn.ParentNode == this.rootNode)
+            this.rootNode.RemoveChild(dn, false);
+
+        this.layout = "buttons";
+    }
+
+    private void RenderButtons(string mode)
+    {
         this.toRemove.Clear();
         foreach (var name in this.windowNodes.Keys)
         {
             if (!this.currentNames.Contains(name))
-            {
                 this.toRemove.Add(name);
-            }
         }
 
         for (var i = 0; i < this.toRemove.Count; i++)
         {
-            var name = this.toRemove[i];
-            if (this.windowNodes.Remove(name, out var node))
-            {
+            if (this.windowNodes.Remove(this.toRemove[i], out var node))
                 this.rootNode.RemoveChild(node, true);
-            }
         }
 
-        // Add or update nodes
+        var showLabel = mode == "Taskbar";
         for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
             var window = this.windowsBuffer[i];
             if (!this.windowNodes.TryGetValue(window.WindowName, out var btnNode))
             {
-                btnNode = new Node
-                {
-                    Style =
-                    {
-                        Flow = Flow.Horizontal,
-                        Padding = new EdgeSize(4, 6, 4, 6),
-                        BorderRadius = 4,
-                        RoundedCorners = RoundedCorners.All
-                    }
-                };
-
-                btnNode.OnClick += _ => this.windowManager.Toggle(window);
-                btnNode.OnRightClick += _ => this.windowManager.Close(window);
-
+                btnNode = this.CreateButtonNode(window.WindowName);
                 this.rootNode.AppendChild(btnNode);
                 this.windowNodes[window.WindowName] = btnNode;
             }
 
-            // Visual styles
-            btnNode.ToggleClass("active", window.IsFocused);
-            btnNode.ToggleClass("open", window.IsOpen);
-            btnNode.ToggleClass("minimized", window.IsMinimized);
-            btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
-
-            btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
-            btnNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? this.MaxTitleWidth : null;
-            btnNode.Tooltip = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
-
-            var showText = this.DisplayMode is "Auto" or "Taskbar";
-            btnNode.NodeValue = showText ? window.CleanTitle : string.Empty;
+            this.UpdateButtonContent(btnNode, window, showLabel);
         }
     }
+
+    private Node CreateButtonNode(string windowName)
+    {
+        var node = new Node
+        {
+            Style =
+            {
+                Flow = Flow.Horizontal,
+                Gap = 4,
+                Padding = new EdgeSize(4, 6, 4, 6),
+                BorderRadius = 4,
+                RoundedCorners = RoundedCorners.All
+            },
+            ChildNodes =
+            {
+                new Node { Id = "icon" },
+                new Node
+                {
+                    Id = "label",
+                    Style =
+                    {
+                        WordWrap = false,
+                        TextOverflow = false // clip + ellipsize instead of overflowing (issue #8.4)
+                    }
+                }
+            }
+        };
+
+        // Bind by stable window name and resolve the live TrackedWindow at click time (issue #2).
+        node.OnClick += _ =>
+        {
+            if (this.currentWindows.TryGetValue(windowName, out var w))
+                this.windowManager.Toggle(w);
+        };
+        node.OnRightClick += _ =>
+        {
+            if (this.currentWindows.TryGetValue(windowName, out var w))
+                this.PresentContextMenu(w);
+        };
+
+        return node;
+    }
+
+    private void UpdateButtonContent(Node btnNode, TrackedWindow window, bool showLabel)
+    {
+        btnNode.ToggleClass("active", window.IsFocused);
+        btnNode.ToggleClass("open", window.IsOpen);
+        btnNode.ToggleClass("minimized", window.IsMinimized);
+        btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
+
+        btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
+        btnNode.Tooltip = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+
+        ApplyIcon(btnNode.ChildNodes[0], window);
+
+        var labelNode = btnNode.ChildNodes[1];
+        if (!Equals(labelNode.NodeValue, window.CleanTitle))
+            labelNode.NodeValue = window.CleanTitle;
+        labelNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? (float)this.MaxTitleWidth : null;
+        labelNode.Style.IsVisible = showLabel;
+    }
+
+    private static void ApplyIcon(Node iconNode, TrackedWindow window)
+    {
+        if (window.IconBytes != null)
+        {
+            if (!ReferenceEquals(iconNode.Style.ImageBytes, window.IconBytes))
+                iconNode.Style.ImageBytes = window.IconBytes;
+            if (iconNode.NodeValue != null)
+                iconNode.NodeValue = null;
+        }
+        else
+        {
+            if (iconNode.Style.ImageBytes != null)
+                iconNode.Style.ImageBytes = null;
+
+            var monogram = GetMonogram(window.CleanTitle);
+            if (!Equals(iconNode.NodeValue, monogram))
+                iconNode.NodeValue = monogram;
+        }
+    }
+
+    /// <summary>First non-whitespace character of the title, upper-cased; a stable icon fallback.</summary>
+    internal static string GetMonogram(string cleanTitle)
+    {
+        foreach (var ch in cleanTitle)
+        {
+            if (!char.IsWhiteSpace(ch))
+                return char.ToUpperInvariant(ch).ToString();
+        }
+
+        return "?";
+    }
+
+    // --- Dropdown layout ----------------------------------------------------------------------------
+
+    private void SwitchToDropdownLayout()
+    {
+        if (this.layout == "dropdown") return;
+
+        foreach (var node in this.windowNodes.Values)
+            this.rootNode.RemoveChild(node, true);
+        this.windowNodes.Clear();
+
+        this.dropdownNode ??= CreateDropdownNode();
+        if (this.dropdownNode.ParentNode != this.rootNode)
+            this.rootNode.AppendChild(this.dropdownNode);
+
+        this.layout = "dropdown";
+    }
+
+    private static Node CreateDropdownNode()
+    {
+        return new Node
+        {
+            Tooltip = "Windows",
+            Style =
+            {
+                Flow = Flow.Horizontal,
+                Gap = 4,
+                Padding = new EdgeSize(4, 6, 4, 6),
+                BorderRadius = 4,
+                RoundedCorners = RoundedCorners.All
+            },
+            ChildNodes =
+            {
+                new Node { Id = "icon", NodeValue = "▾" }, // caret; the popup opens via Popup.
+                new Node { Id = "badge", NodeValue = "0" }
+            }
+        };
+    }
+
+    private void RenderDropdown()
+    {
+        var popup = this.EnsureMenuPopup();
+        popup.Clear(true);
+
+        for (var i = 0; i < this.windowsBuffer.Count; i++)
+        {
+            var window = this.windowsBuffer[i];
+            var windowName = window.WindowName;
+            var label = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+
+            popup.Add(new MenuPopup.Button(label)
+            {
+                Id = windowName,
+                OnClick = () =>
+                {
+                    if (this.currentWindows.TryGetValue(windowName, out var w))
+                        this.windowManager.Toggle(w);
+                }
+            });
+        }
+
+        if (this.dropdownNode is { } dn)
+            dn.ChildNodes[1].NodeValue = this.windowsBuffer.Count.ToString();
+    }
+
+    private MenuPopup EnsureMenuPopup() => this.menuPopup ??= new MenuPopup();
+
+    // --- Context menu (issue #3) --------------------------------------------------------------------
+
+    /// <summary>
+    /// Per-state right-click actions from the design spec: Restore/Minimize + Close for standalone
+    /// windows, and Select Active Tab / Close All Tabs for docked tab groups.
+    /// </summary>
+    internal List<MenuAction> BuildContextActions(TrackedWindow window)
+    {
+        var actions = new List<MenuAction>();
+
+        if (this.GroupDockedTabs && window.DockGroupKey is { } groupKey)
+        {
+            actions.Add(new MenuAction("select_active", "Select Active Tab", () => this.windowManager.Restore(window)));
+            actions.Add(new MenuAction("close_all", "Close All Tabs", () => this.windowManager.CloseDockGroup(groupKey)));
+            return actions;
+        }
+
+        if (window.IsMinimized)
+            actions.Add(new MenuAction("restore", "Restore", () => this.windowManager.Restore(window)));
+        else
+            actions.Add(new MenuAction("minimize", "Minimize", () => this.windowManager.Minimize(window)));
+
+        actions.Add(new MenuAction("close", "Close", () => this.windowManager.Close(window)));
+        return actions;
+    }
+
+    private void PresentContextMenu(TrackedWindow window)
+    {
+        var entries = this.BuildContextActions(window)
+            .Select(a => new ContextMenuEntry(a.Id) { Label = a.Label, OnClick = a.Execute })
+            .ToList();
+
+        new ContextMenu(entries).Present();
+    }
+
+    internal sealed record MenuAction(string Id, string Label, Action Execute);
 }

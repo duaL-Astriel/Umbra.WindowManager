@@ -199,6 +199,25 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_CloseDockGroup_ClosesAllMembers()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab 1") { IsOpen = true };
+        var win2 = new DummyWindow("Tab 2") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+
+        service.RegisterDockGroup("dock_close_all", "Tab 1", new[] { tw1, tw2 });
+
+        service.CloseDockGroup("dock_close_all");
+
+        Assert.False(win1.IsOpen);
+        Assert.False(win2.IsOpen);
+        Assert.False(tw1.IsMinimized);
+        Assert.False(tw2.IsMinimized);
+    }
+
+    [Fact]
     public void WindowManagerService_RegisterDockGroup_ReusesGroupWhenUnchanged()
     {
         var service = new WindowManagerService();
