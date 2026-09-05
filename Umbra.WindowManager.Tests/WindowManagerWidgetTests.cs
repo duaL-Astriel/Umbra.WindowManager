@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Dalamud.Interface.Windowing;
+using Umbra.Common;
 using Umbra.Widgets;
 using Umbra.WindowManager.Services.WindowManager;
 using Umbra.WindowManager.Widgets;
@@ -145,6 +146,13 @@ public class WindowManagerWidgetTests
         Assert.False(node.ChildNodes[1].Style.IsVisible ?? true);
         Assert.Equal("D", node.ChildNodes[0].NodeValue);
         Assert.Equal("DisplayModeWin", node.Tooltip);
+    }
+
+    [Fact]
+    public void MenuPopupButton_SettingInvalidNodeId_ThrowsArgumentException()
+    {
+        var button = new MenuPopup.Button("test");
+        Assert.Throws<ArgumentException>(() => button.Id = "AutoRetainer 4.6.1.34 | Session expires in 2 days 23 hours###AutoRetainer");
     }
 
     [Fact]
