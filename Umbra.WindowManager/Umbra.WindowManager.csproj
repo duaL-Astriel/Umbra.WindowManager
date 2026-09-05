@@ -25,12 +25,12 @@
         <ProductName>Umbra Window Manager</ProductName>
         <Product>Umbra Window Manager</Product>
         <AssemblyTitle>Umbra Window Manager</AssemblyTitle>
-        <Authors>Una</Authors>
-        <Company>Una</Company>
+        <Authors>Astriel</Authors>
+        <Company>Astriel</Company>
         <Version>1.0.0.0</Version>
         <Description>Window manager plugin for the Umbra toolbar.</Description>
-        <Copyright>(C)2026</Copyright>
-        <PackageProjectUrl>https://github.com/una-xiv/umbra</PackageProjectUrl>
+        <Copyright>(C)2026 Astriel</Copyright>
+        <PackageProjectUrl>https://github.com/duaL-Astriel/Umbra.WindowManager</PackageProjectUrl>
         <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
         <IsPackable>false</IsPackable>
     </PropertyGroup>
