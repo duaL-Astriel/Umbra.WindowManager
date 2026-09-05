@@ -199,28 +199,49 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
-    public void WindowManagerService_OnWindowsChanged_FiresOnMutations()
+    public void WindowManagerService_CloseDockGroup_ClosesAllMembers()
     {
         var service = new WindowManagerService();
-        var win = new DummyWindow("Event Window") { IsOpen = true };
+        var win1 = new DummyWindow("Tab 1") { IsOpen = true };
+        var win2 = new DummyWindow("Tab 2") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
 
-        int fireCount = 0;
-        service.OnWindowsChanged += () => fireCount++;
+        service.RegisterDockGroup("dock_close_all", "Tab 1", new[] { tw1, tw2 });
 
-        var tw = service.RegisterWindow(win);
-        Assert.Equal(1, fireCount);
+        service.CloseDockGroup("dock_close_all");
 
-        service.Minimize(tw);
-        Assert.Equal(2, fireCount);
+        Assert.False(win1.IsOpen);
+        Assert.False(win2.IsOpen);
+        Assert.False(tw1.IsMinimized);
+        Assert.False(tw2.IsMinimized);
+    }
 
-        service.Restore(tw);
-        Assert.Equal(3, fireCount);
+    [Fact]
+    public void WindowManagerService_RegisterDockGroup_ReusesGroupWhenUnchanged()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab 1") { IsOpen = true };
+        var win2 = new DummyWindow("Tab 2") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
 
-        service.Close(tw);
-        Assert.Equal(4, fireCount);
+        service.RegisterDockGroup("dock_reuse", "Tab 1", new[] { tw1, tw2 });
+        var first = service.PeekDockGroup("dock_reuse");
+        Assert.NotNull(first);
 
-        service.UnregisterWindow(win);
-        Assert.Equal(5, fireCount);
+        // Same members + active tab must not allocate a new DockGroup every frame (issue #6).
+        service.RegisterDockGroup("dock_reuse", "Tab 1", new[] { tw1, tw2 });
+        Assert.Same(first, service.PeekDockGroup("dock_reuse"));
+
+        // A changed active tab replaces the group.
+        service.RegisterDockGroup("dock_reuse", "Tab 2", new[] { tw1, tw2 });
+        var second = service.PeekDockGroup("dock_reuse");
+        Assert.NotSame(first, second);
+
+        // A changed member set replaces the group.
+        service.RegisterDockGroup("dock_reuse", "Tab 2", new[] { tw1 });
+        Assert.NotSame(second, service.PeekDockGroup("dock_reuse"));
     }
 
     [Fact]
@@ -368,26 +389,22 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
-    public void WindowManagerService_RegisterWindow_WhenInstanceUnchanged_DoesNotFireOnWindowsChanged()
+    public void WindowManagerService_RegisterWindow_WhenInstanceUnchanged_ReturnsSameTrackedWindow()
     {
         var service = new WindowManagerService();
         var win = new DummyWindow("Stable Window") { IsOpen = true };
 
-        var fireCount = 0;
-        service.OnWindowsChanged += () => fireCount++;
-
         var tw1 = service.RegisterWindow(win);
-        Assert.Equal(1, fireCount);
 
-        // Re-registering the exact same instance should not fire OnWindowsChanged
+        // Re-registering the exact same instance returns the same TrackedWindow.
         var tw2 = service.RegisterWindow(win);
         Assert.Same(tw1, tw2);
-        Assert.Equal(1, fireCount);
 
-        // Registering a new instance with the same name should fire OnWindowsChanged
+        // Registering a new instance with the same name replaces the tracked window.
         var winReplacement = new DummyWindow("Stable Window") { IsOpen = true };
         var tw3 = service.RegisterWindow(winReplacement);
         Assert.NotSame(tw1, tw3);
-        Assert.Equal(2, fireCount);
+        Assert.True(tw3.TryGetWindow(out var retrieved));
+        Assert.Same(winReplacement, retrieved);
     }
 }

@@ -24,6 +24,19 @@ public class TrackedWindow
     public bool IsMinimized { get; set; }
     public string? DockGroupKey { get; set; }
 
+    /// <summary>
+    /// Internal name of the Dalamud plugin that owns this window, resolved by
+    /// <see cref="DalamudWindowTracker"/> during discovery. <c>null</c> until resolved.
+    /// </summary>
+    public string? PluginInternalName { get; set; }
+
+    /// <summary>
+    /// Raw bytes of the owning plugin's icon (e.g. <c>images/icon.png</c>), if one was found on disk.
+    /// Shared by reference across all windows of the same plugin. <c>null</c> when no icon is available;
+    /// consumers should fall back to a text monogram.
+    /// </summary>
+    public byte[]? IconBytes { get; set; }
+
     public bool TryGetWindow([NotNullWhen(true)] out IWindow? window) => this.windowRef.TryGetTarget(out window);
 
     public bool IsOpen

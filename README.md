@@ -25,8 +25,9 @@ It acts as a comprehensive taskbar and window manager for the entire Dalamud plu
 - **Flexible Toolbar Widget**:
   - Built with `Una.Drawing.Node` layout system.
   - Interactive states: `.active` (accented when focused), `.open` (standard background), `.minimized` (dimmed at 60% opacity), `.dock-group` (pill indicator for grouped tabs).
-  - Configurable display modes: `Auto`, `Taskbar`, `IconOnly`, `Dropdown`.
-  - Left-click to focus, bring to front, or toggle minimize/restore; right-click to close.
+  - Per-window icons: renders the owning plugin's icon (`images/icon.png`, resolved via reflection) with a text-monogram fallback, so Icon-Only mode always shows something scannable.
+  - Configurable display modes, all functional: `Taskbar` (icon + label), `IconOnly` (icon + tooltip), `Dropdown` (single button with a window-count badge opening an Umbra `MenuPopup`), and `Auto` (starts as Taskbar and condenses toward IconOnly/Dropdown as toolbar width tightens).
+  - Left-click to focus, bring to front, or toggle minimize/restore; right-click opens a per-state context menu (Minimize/Restore, Close; or Select Active Tab / Close All Tabs for dock groups).
 
 ---
 
@@ -66,7 +67,7 @@ Umbra Window Manager uses a dual-layer observation and orchestration architectur
 1. **`WindowInfoHelper`**: Parses ImGui identifiers (`##` and `###`) from window titles to extract clean human-readable names and stable identifiers.
 2. **`TrackedWindow`**: Encapsulates a weak reference to `IWindow`, tracking clean titles, namespaces, dock group memberships, and minimized states.
 3. **`DockGroup`**: Aggregates docked sibling tabs sharing an ImGui dock node, orchestrating group-level minimize and restoration of the active tab.
-4. **`WindowManagerService`**: Central thread-safe state machine managing tracked windows and dock groups, firing events (`OnWindowsChanged`) when states update.
+4. **`WindowManagerService`**: Central thread-safe state machine managing tracked windows and dock groups. Dock-group registration is idempotent, so a stable dock group is not re-allocated on every frame.
 5. **`DalamudWindowTracker`**: Reflection service that runs every 2 seconds (`[OnTick]`) and on demand. Safely checks service initialization tokens, discovers `WindowSystem`s across loaded plugins, and injects minimize `TitleBarButton`s.
 6. **`ImGuiContextMonitor`**: Per-frame draw hook (`[OnDraw]`) that checks native ImGui pointers for collapses and dock memberships using pooled collections to prevent draw-loop allocations.
 7. **`WindowManagerWidget`**: Umbra `ToolbarWidget` maintaining a dynamic `Una.Drawing.Node` hierarchy with live style updates, tooltip management, and click handlers.
@@ -133,16 +134,47 @@ out/Debug/Umbra.WindowManager.dll
 
 ### Run Unit Tests
 
-Execute the comprehensive xUnit test suite (58 unit tests covering all components):
+Execute the comprehensive xUnit test suite (79 unit tests covering all components):
 
 ```powershell
 dotnet test
 ```
 
-Expected output:
-```text
-Bestanden! : Fehler: 0, erfolgreich: 58, übersprungen: 0, gesamt: 58
-```
+All tests should pass with zero failures and zero skips. (The exact count grows as coverage is
+added; run `dotnet test` for the current number rather than relying on a hard-coded value here.)
+
+---
+
+## Installing into Umbra
+
+Umbra loads third-party widgets through its built-in **custom plugin** system
+(`Umbra.Plugins.PluginManager`), not through a Dalamud manifest. **No `manifest.json` or dedicated
+entry-point class is required** — Umbra discovers this assembly's `[ToolbarWidget]` and `[Service]`
+types by attribute scanning once the DLL is loaded, exactly as it does for its built-in widgets. The
+plugin's display metadata (name, author, version, description) is read from the assembly attributes
+that `Umbra.WindowManager.csproj` already sets.
+
+To load the built `Umbra.WindowManager.dll`:
+
+1. Build the project (`dotnet build -c Release`); the assembly is written to `out/Release/Umbra.WindowManager.dll`.
+2. In-game, open **Umbra Settings → Plugins** and enable **Custom Plugins** (this is an
+   experimental/developer feature; Umbra will warn that custom plugins run unsandboxed).
+3. Add this plugin either:
+   - **From a local file** — point Umbra at the built `Umbra.WindowManager.dll`
+     (`PluginEntry.FromFile`), or
+   - **From a GitHub repository** — provide the `owner/repo` of a release that ships the DLL
+     (`PluginEntry.FromRepository`).
+4. Umbra loads the assembly into an isolated `AssemblyLoadContext` (`PluginLoadContext`) and watches
+   the file for changes (hot-reload). Restart Umbra if it reports that a restart is required.
+5. Open **Umbra Settings → Widgets**, add the **Window Manager** widget to a toolbar, and configure it.
+
+> **Dependency resolution:** all Umbra/Dalamud references in the `.csproj` use `<Private>false</Private>`,
+> so shared assemblies (`Umbra`, `Umbra.Common`, `Una.Drawing`, `Dalamud`, …) are resolved from the
+> host at load time rather than copied alongside the plugin. Do not ship those DLLs with the plugin.
+
+> **In-game smoke test:** because loading requires a live FFXIV + Dalamud + Umbra session, the manual
+> verification steps in [`docs/superpowers/walkthrough.md`](docs/superpowers/walkthrough.md) still need
+> to be run in-game to confirm the end-to-end experience.
 
 ---
 
@@ -152,7 +184,7 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
-| `WindowManager.DisplayMode` | Select | `Auto` | Presentation mode: `Auto`, `Taskbar` (icon + label), `IconOnly` (compact), `Dropdown` (summary badge). |
+| `WindowManager.DisplayMode` | Select | `Auto` | Presentation mode: `Auto` (Taskbar, condensing under width pressure), `Taskbar` (icon + label), `IconOnly` (icon + tooltip), `Dropdown` (single button with a window-count badge that opens a `MenuPopup`). |
 | `WindowManager.MaxTitleWidth` | Integer | `140` | Maximum pixel width for window title labels before truncation (range: 60–300 px). |
 | `WindowManager.GroupDockedTabs` | Boolean | `true` | Whether docked tabs are visually marked (`.dock-group`) and minimized/restored collectively. |
 
@@ -166,7 +198,9 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 | **Left-Click** | Open & unfocused window | Brings window to front and focuses it. |
 | **Left-Click** | Open & focused window | Minimizes window to the toolbar. |
 | **Left-Click** | Docked tab group | Toggles minimize / restore for all tabs in the dock container. |
-| **Right-Click** | Any window | Closes the window (`IsOpen = false`). |
+| **Right-Click** | Open window | Context menu: **Minimize**, **Close**. |
+| **Right-Click** | Minimized window | Context menu: **Restore**, **Close**. |
+| **Right-Click** | Docked tab group | Context menu: **Select Active Tab**, **Close All Tabs**. |
 | **Title Bar Button** | Any window | Clicks the injected minimize button (`FontAwesomeIcon.WindowMinimize`) to minimize. |
 | **Double-Click Title Bar** | Native ImGui collapse | Intercepted and routed to full window minimize. |
 

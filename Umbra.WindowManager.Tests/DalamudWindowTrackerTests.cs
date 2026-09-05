@@ -40,6 +40,44 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
+    public void InjectMinimizeButton_InjectsEvenWhenPluginHasOwnMinimizeButton()
+    {
+        // Issue #8.1: a plugin shipping its own WindowMinimize button must not suppress ours; we match
+        // by window instance, not by icon, so our minimize action is always wired.
+        var win = new DummyWindow("HasOwnMinimize");
+        win.TitleBarButtons.Add(new TitleBarButton { Icon = FontAwesomeIcon.WindowMinimize });
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(win);
+
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+
+        Assert.Equal(2, win.TitleBarButtons.Count);
+
+        // Our button (added last) minimizes the window.
+        win.TitleBarButtons.Last().Click?.Invoke(Dalamud.Bindings.ImGui.ImGuiMouseButton.Left);
+        Assert.True(tw.IsMinimized);
+        Assert.False(win.IsOpen);
+    }
+
+    [Fact]
+    public void TrackWindowSystem_WithPluginContext_SetsPluginNameAndIcon()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("IconSys");
+        var win = new DummyWindow("IconWindow");
+        ws.AddWindow(win);
+
+        var iconBytes = new byte[] { 1, 2, 3 };
+        tracker.TrackWindowSystem(ws, "MyPlugin", iconBytes);
+
+        var tw = service.GetTrackedWindows().Single(t => t.WindowName == "IconWindow");
+        Assert.Equal("MyPlugin", tw.PluginInternalName);
+        Assert.Same(iconBytes, tw.IconBytes);
+    }
+
+    [Fact]
     public void InjectMinimizeButton_NullTitleBarButtons_DoesNotThrow()
     {
         var win = new DummyWindow("NullButtons");
