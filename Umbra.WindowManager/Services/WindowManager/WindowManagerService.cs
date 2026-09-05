@@ -1,7 +1,5 @@
-using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Linq;
 using Dalamud.Interface.Windowing;
 using Umbra.Common;
 
@@ -12,8 +10,6 @@ public class WindowManagerService
 {
     private readonly ConcurrentDictionary<string, TrackedWindow> windows = new();
     private readonly ConcurrentDictionary<string, DockGroup> dockGroups = new();
-
-    public event Action? OnWindowsChanged;
 
     public void GetTrackedWindows(List<TrackedWindow> destination)
     {
@@ -74,39 +70,18 @@ public class WindowManagerService
     {
         this.PruneDeadWindows();
 
-        var changed = false;
-        var tw = this.windows.AddOrUpdate(
+        return this.windows.AddOrUpdate(
             window.WindowName,
-            _ =>
-            {
-                changed = true;
-                return new TrackedWindow(window);
-            },
+            _ => new TrackedWindow(window),
             (_, existing) =>
-            {
-                if (existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window))
-                {
-                    return existing;
-                }
-
-                changed = true;
-                return new TrackedWindow(window);
-            });
-
-        if (changed)
-        {
-            this.OnWindowsChanged?.Invoke();
-        }
-
-        return tw;
+                existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window)
+                    ? existing
+                    : new TrackedWindow(window));
     }
 
     public void UnregisterWindow(IWindow window)
     {
-        if (this.windows.TryRemove(window.WindowName, out _))
-        {
-            this.OnWindowsChanged?.Invoke();
-        }
+        this.windows.TryRemove(window.WindowName, out _);
     }
 
     public void Minimize(TrackedWindow tracked)
@@ -120,8 +95,6 @@ public class WindowManagerService
             tracked.IsMinimized = true;
             tracked.IsOpen = false;
         }
-
-        this.OnWindowsChanged?.Invoke();
     }
 
     public void Restore(TrackedWindow tracked)
@@ -136,8 +109,6 @@ public class WindowManagerService
             tracked.IsOpen = true;
             tracked.BringToFront();
         }
-
-        this.OnWindowsChanged?.Invoke();
     }
 
     public void Toggle(TrackedWindow tracked)
@@ -160,14 +131,44 @@ public class WindowManagerService
     {
         tracked.IsMinimized = false;
         tracked.IsOpen = false;
-        this.OnWindowsChanged?.Invoke();
     }
 
-    public void RegisterDockGroup(string groupKey, string activeWindowName, IEnumerable<TrackedWindow> members)
+    /// <summary>
+    /// Closes every window belonging to the given dock group. Used by the toolbar's
+    /// "Close All Tabs" context-menu action.
+    /// </summary>
+    public void CloseDockGroup(string groupKey)
     {
-        var group = new DockGroup(groupKey, activeWindowName, members);
-        this.dockGroups[groupKey] = group;
+        if (!this.dockGroups.TryGetValue(groupKey, out var group)) return;
+
+        foreach (var member in group.Members)
+        {
+            member.IsMinimized = false;
+            member.IsOpen = false;
+        }
     }
+
+    /// <summary>
+    /// Registers (or refreshes) a dock group. This is called from the per-frame draw loop, so it is
+    /// idempotent: if a group with the same key, active tab, and exact member set already exists, no new
+    /// <see cref="DockGroup"/> is allocated. This keeps the draw loop allocation-free while a dock group
+    /// is on screen (see issue #6).
+    /// </summary>
+    public void RegisterDockGroup(string groupKey, string activeWindowName, IReadOnlyList<TrackedWindow> members)
+    {
+        if (this.dockGroups.TryGetValue(groupKey, out var existing)
+            && existing.ActiveWindowName == activeWindowName
+            && MembersEqual(existing.Members, members))
+        {
+            return;
+        }
+
+        this.dockGroups[groupKey] = new DockGroup(groupKey, activeWindowName, members);
+    }
+
+    /// <summary>Test/diagnostic accessor for the currently registered dock group, if any.</summary>
+    internal DockGroup? PeekDockGroup(string groupKey) =>
+        this.dockGroups.TryGetValue(groupKey, out var group) ? group : null;
 
     public void RemoveDockGroup(string groupKey)
     {
@@ -179,5 +180,19 @@ public class WindowManagerService
                     member.DockGroupKey = null;
             }
         }
+    }
+
+    private static bool MembersEqual(IReadOnlyList<TrackedWindow> a, IReadOnlyList<TrackedWindow> b)
+    {
+        if (a.Count != b.Count) return false;
+
+        for (var i = 0; i < a.Count; i++)
+        {
+            // Reference equality is intentional: the monitor emits members in a stable order, and a
+            // re-instantiated window produces a fresh TrackedWindow instance that must force a refresh.
+            if (!ReferenceEquals(a[i], b[i])) return false;
+        }
+
+        return true;
     }
 }

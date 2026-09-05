@@ -13,6 +13,7 @@ public class ImGuiContextMonitor
     private readonly Dictionary<string, TrackedWindow> trackedMap = new();
     private readonly Dictionary<uint, List<TrackedWindow>> dockGroups = new();
     private readonly Dictionary<uint, string> dockActiveTab = new();
+    private readonly Dictionary<uint, string> dockKeyCache = new();
     private readonly List<List<TrackedWindow>> listPool = new();
     private readonly List<TrackedWindow> trackedBuffer = [];
 
@@ -82,20 +83,32 @@ public class ImGuiContextMonitor
             }
         }
 
-        // Register multi-window dock groups
+        // Register multi-window dock groups. RegisterDockGroup is idempotent, and the dock key string is
+        // cached per dock id, so a stable dock group produces zero draw-loop allocations (see issue #6).
         foreach (var (dockId, members) in this.dockGroups)
         {
             if (members.Count > 1)
             {
                 var activeName = this.dockActiveTab.GetValueOrDefault(dockId, members[0].WindowName);
-                this.windowManager.RegisterDockGroup($"dock_{dockId}", activeName, members);
+                this.windowManager.RegisterDockGroup(this.GetDockKey(dockId), activeName, members);
             }
             else if (members.Count == 1 && members[0].DockGroupKey != null)
             {
-                this.windowManager.RemoveDockGroup($"dock_{dockId}");
+                this.windowManager.RemoveDockGroup(this.GetDockKey(dockId));
                 members[0].DockGroupKey = null;
             }
         }
+    }
+
+    private string GetDockKey(uint dockId)
+    {
+        if (!this.dockKeyCache.TryGetValue(dockId, out var key))
+        {
+            key = $"dock_{dockId}";
+            this.dockKeyCache[dockId] = key;
+        }
+
+        return key;
     }
 
     private List<TrackedWindow> GetPooledList()
