@@ -54,6 +54,24 @@ public class TrackedWindow
 
     public bool IsFocused => this.TryGetWindow(out var w) && w.IsFocused;
 
+    /// <summary>
+    /// Whether the window is an interactive, titled user-facing window suitable for management.
+    /// Excludes frameless HUD overlays, headless monitors, and clickthrough windows.
+    /// </summary>
+    public bool IsManageable
+    {
+        get
+        {
+            if (!this.TryGetWindow(out var w)) return false;
+            if ((w.Flags & (Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar |
+                           Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs)) != 0)
+                return false;
+            if (w.IsClickthrough)
+                return false;
+            return true;
+        }
+    }
+
     public void BringToFront()
     {
         if (this.TryGetWindow(out var w))

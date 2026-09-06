@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Umbra.Common;
 using Umbra.Widgets;
@@ -358,10 +359,11 @@ public class WindowManagerWidgetTests
         var vars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
 
         Assert.NotNull(vars);
-        Assert.Equal(3, vars.Count);
+        Assert.Equal(4, vars.Count);
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
+        Assert.Contains(vars, v => v.Id == "WindowManager.Decorate");
     }
 
     [Fact]
@@ -378,5 +380,47 @@ public class WindowManagerWidgetTests
 
         widget.GroupDockedTabs = false;
         Assert.False(widget.GroupDockedTabs);
+
+        widget.Decorate = false;
+        Assert.False(widget.Decorate);
+    }
+
+    [Fact]
+    public void Decorate_TogglesDecoratedClassOnRootNode()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        // Default Decorate is true, rootNode has widget class
+        Assert.Contains("widget", widget.Node.ClassList);
+
+        widget.UpdateButtons();
+        Assert.Contains("decorated", widget.Node.ClassList);
+
+        widget.Decorate = false;
+        widget.UpdateButtons();
+        Assert.DoesNotContain("decorated", widget.Node.ClassList);
+    }
+
+    [Fact]
+    public void DropdownMode_RendersProperIconBadgeAndCaret()
+    {
+        var ddNode = WindowManagerWidget.CreateDropdownNode();
+
+        // Should have 3 child nodes: icon (WindowRestore), badge (count), caret
+        Assert.Equal(3, ddNode.ChildNodes.Count);
+        var iconNode = ddNode.ChildNodes[0];
+        var badgeNode = ddNode.ChildNodes[1];
+        var caretNode = ddNode.ChildNodes[2];
+
+        Assert.Equal("icon", iconNode.Id);
+        Assert.Equal(Dalamud.Interface.FontAwesomeIcon.WindowRestore.ToIconString(), iconNode.NodeValue);
+
+        Assert.Equal("badge", badgeNode.Id);
+        Assert.Equal("0", badgeNode.NodeValue);
+
+        Assert.Equal("caret", caretNode.Id);
+        Assert.Equal("▾", caretNode.NodeValue);
     }
 }
+
