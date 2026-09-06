@@ -240,7 +240,7 @@ public class WindowManagerWidgetTests
         var widget = CreateWidget(service);
 
         var actions = widget.BuildContextActions(tw);
-        Assert.Equal(new[] { "minimize", "close" }, actions.Select(a => a.Id).ToArray());
+        Assert.Equal(new[] { "minimize", "close", "hide" }, actions.Select(a => a.Id).ToArray());
 
         actions.Single(a => a.Id == "close").Execute();
         Assert.False(win.IsOpen);
@@ -257,7 +257,7 @@ public class WindowManagerWidgetTests
         var widget = CreateWidget(service);
 
         var actions = widget.BuildContextActions(tw);
-        Assert.Equal(new[] { "restore", "close" }, actions.Select(a => a.Id).ToArray());
+        Assert.Equal(new[] { "restore", "close", "hide" }, actions.Select(a => a.Id).ToArray());
 
         actions.Single(a => a.Id == "restore").Execute();
         Assert.False(tw.IsMinimized);
@@ -276,12 +276,13 @@ public class WindowManagerWidgetTests
 
         var widget = CreateWidget(service);
         var actions = widget.BuildContextActions(tw1);
-        Assert.Equal(new[] { "select_active", "close_all" }, actions.Select(a => a.Id).ToArray());
+        Assert.Equal(new[] { "select_active", "close_all", "hide" }, actions.Select(a => a.Id).ToArray());
 
         actions.Single(a => a.Id == "close_all").Execute();
         Assert.False(win1.IsOpen);
         Assert.False(win2.IsOpen);
     }
+
 
     [Theory]
     [InlineData("Peeping Tom", "P")]
@@ -375,15 +376,17 @@ public class WindowManagerWidgetTests
         var vars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
 
         Assert.NotNull(vars);
-        Assert.Equal(4, vars.Count);
+        Assert.Equal(5, vars.Count);
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
+        Assert.Contains(vars, v => v.Id == "WindowManager.Blacklist");
         var decorateVar = vars.OfType<BooleanWidgetConfigVariable>().FirstOrDefault(v => v.Id == "WindowManager.Decorate");
         Assert.NotNull(decorateVar);
         Assert.Equal("General", decorateVar.Category);
         Assert.Equal("Window Manager", decorateVar.Group);
     }
+
 
     [Fact]
     public void Decorate_ReadsFromDecorateConfigVariable_WhenPresent()
@@ -610,5 +613,114 @@ public class WindowManagerWidgetTests
         Assert.Null(iconNode.NodeValue);
         Assert.Same(fakePng, iconNode.Style.ImageBytes);
     }
+
+    [Fact]
+    public void UpdateButtons_ExcludesBlacklistedWindowsByCleanTitle()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Blacklisted Window");
+        var win2 = new DummyWindow("Allowed Window");
+        service.RegisterWindow(win1);
+        service.RegisterWindow(win2);
+
+        var widget = CreateWidget(service);
+        widget.Blacklist = "Blacklisted Window";
+        widget.UpdateButtons();
+
+        Assert.Single(widget.Node.ChildNodes);
+        Assert.True(widget.WindowNodes.ContainsKey("Allowed Window"));
+        Assert.False(widget.WindowNodes.ContainsKey("Blacklisted Window"));
+    }
+
+    [Fact]
+    public void UpdateButtons_ExcludesBlacklistedWindowsByWindowName()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("SameTitle##SpecialId");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.Blacklist = "SameTitle##SpecialId";
+        widget.UpdateButtons();
+
+        Assert.Empty(widget.Node.ChildNodes);
+    }
+
+    [Fact]
+    public void UpdateButtons_ExcludesBlacklistedWindowsById()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("CustomTitle##HiddenIdentifier");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.Blacklist = "HiddenIdentifier";
+        widget.UpdateButtons();
+
+        Assert.Empty(widget.Node.ChildNodes);
+    }
+
+    [Fact]
+    public void UpdateButtons_ExcludesBlacklistedWindowsByPluginName()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("SomePluginWindow");
+        var tw = service.RegisterWindow(win);
+        tw.PluginInternalName = "BlockedPlugin";
+
+        var widget = CreateWidget(service);
+        widget.Blacklist = "BlockedPlugin, AnotherPlugin";
+        widget.UpdateButtons();
+
+        Assert.Empty(widget.Node.ChildNodes);
+    }
+
+    [Fact]
+    public void BuildContextActions_IncludesHideFromToolbarAction()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("WindowToHide");
+        var tw = service.RegisterWindow(win);
+        var widget = CreateWidget(service);
+
+        var actions = widget.BuildContextActions(tw);
+        var hideAction = actions.FirstOrDefault(a => a.Id == "hide");
+        Assert.NotNull(hideAction);
+        Assert.Equal("Hide from Toolbar", hideAction!.Label);
+    }
+
+    [Fact]
+    public void AddToBlacklist_AppendsToBlacklistAndRemovesButton()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("WindowToHide");
+        var tw = service.RegisterWindow(win);
+        var widget = CreateWidget(service);
+
+        widget.UpdateButtons();
+        Assert.Single(widget.Node.ChildNodes);
+
+        widget.AddToBlacklist(tw);
+        Assert.Contains("WindowToHide", widget.Blacklist);
+        Assert.Empty(widget.Node.ChildNodes);
+    }
+
+    [Fact]
+    public void GetConfigVariables_IncludesBlacklistVariable()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        var method = typeof(WindowManagerWidget).GetMethod("GetConfigVariables", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var vars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
+
+        Assert.NotNull(vars);
+        var blVar = vars.OfType<StringWidgetConfigVariable>().FirstOrDefault(v => v.Id == "WindowManager.Blacklist");
+        Assert.NotNull(blVar);
+        Assert.Equal("General", blVar.Category);
+        Assert.Equal("Window Manager", blVar.Group);
+    }
 }
+
 

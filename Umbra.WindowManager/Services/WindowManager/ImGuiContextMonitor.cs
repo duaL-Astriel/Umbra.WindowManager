@@ -16,11 +16,18 @@ public class ImGuiContextMonitor
     private readonly Dictionary<uint, string> dockKeyCache = new();
     private readonly List<List<TrackedWindow>> listPool = new();
     private readonly List<TrackedWindow> trackedBuffer = [];
+    private readonly HashSet<string> seenWindows = [];
 
     public ImGuiContextMonitor(WindowManagerService windowManager)
     {
         this.windowManager = windowManager;
     }
+
+    public static bool ValidateWindowDimensions(System.Numerics.Vector2 size) =>
+        size.X > 0 && size.Y > 0;
+
+    public static bool ValidateWindowContent(System.Numerics.Vector2 contentSize, int drawCmdCount) =>
+        contentSize.X > 0 || contentSize.Y > 0 || drawCmdCount > 2;
 
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
@@ -28,6 +35,7 @@ public class ImGuiContextMonitor
         var ctx = ImGui.GetCurrentContext();
         if (ctx.IsNull) return;
 
+        this.seenWindows.Clear();
         this.trackedMap.Clear();
         this.windowManager.GetTrackedWindows(this.trackedBuffer);
         for (var i = 0; i < this.trackedBuffer.Count; i++)
@@ -52,6 +60,23 @@ public class ImGuiContextMonitor
             var name = win.Name != null ? System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)win.Name) : null;
             if (string.IsNullOrEmpty(name) || !this.trackedMap.TryGetValue(name, out var tracked))
                 continue;
+
+            this.seenWindows.Add(name);
+
+            // Validate window presence: dimensions, content, and visibility
+            var hasValidSize = ValidateWindowDimensions(win.Size);
+            var hasContent = win.Appearing || ValidateWindowContent(win.ContentSize, win.DrawList.IsNull ? 0 : win.DrawList.CmdBuffer.Size);
+            var isHidden = win.Hidden;
+
+            if (hasValidSize && hasContent && !isHidden)
+            {
+                tracked.HasConfirmedUi = true;
+                tracked.UnseenFrames = 0;
+            }
+            else
+            {
+                tracked.HasConfirmedUi = false;
+            }
 
             // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
             if (win.Collapsed)
@@ -113,7 +138,29 @@ public class ImGuiContextMonitor
                 members[0].DockGroupKey = null;
             }
         }
+
+        // For open non-minimized windows not observed in ctx.Windows, count missing frames
+        for (var i = 0; i < this.trackedBuffer.Count; i++)
+        {
+            var t = this.trackedBuffer[i];
+            if (this.seenWindows.Contains(t.WindowName))
+                continue;
+
+            if (t.IsOpen && !t.IsMinimized)
+            {
+                t.UnseenFrames++;
+                if (t.UnseenFrames > 5)
+                {
+                    t.HasConfirmedUi = false;
+                }
+            }
+            else
+            {
+                t.UnseenFrames = 0;
+            }
+        }
     }
+
 
     private string GetDockKey(uint dockId)
     {

@@ -44,9 +44,29 @@ public class TrackedWindow
 
     public bool IsEligibleWindow => this.IsManageable;
 
+    /// <summary>
+    /// Whether the underlying window passes its <see cref="IWindow.DrawConditions"/>.
+    /// Returns <c>false</c> if draw conditions fail or throw an exception.
+    /// </summary>
+    public bool PassesDrawConditions
+    {
+        get
+        {
+            if (!this.TryGetWindow(out var w)) return false;
+            try
+            {
+                return w.DrawConditions();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     public bool IsOpen
     {
-        get => this.TryGetWindow(out var w) && w.IsOpen;
+        get => this.TryGetWindow(out var w) && w.IsOpen && this.PassesDrawConditions;
         set
         {
             if (this.TryGetWindow(out var w))
@@ -54,17 +74,39 @@ public class TrackedWindow
         }
     }
 
+    /// <summary>
+    /// Direct check of the underlying window's <see cref="IWindow.IsOpen"/> flag without evaluating
+    /// <see cref="PassesDrawConditions"/>.
+    /// </summary>
+    public bool IsUnderlyingOpen => this.TryGetWindow(out var w) && w.IsOpen;
+
     public bool IsFocused => this.TryGetWindow(out var w) && w.IsFocused;
 
     /// <summary>
+    /// Whether the window is confirmed to be rendered in the active ImGui context with positive dimensions
+    /// and visual content. Defaults to true until ImGui context monitoring evaluates it.
+    /// </summary>
+    public bool HasConfirmedUi { get; set; } = true;
+
+    /// <summary>
+    /// Consecutive frames where this window was open but not observed in the active ImGui context.
+    /// </summary>
+    public int UnseenFrames { get; set; }
+
+    /// <summary>
     /// Whether the window is an interactive, titled user-facing window suitable for management.
-    /// Excludes frameless HUD overlays, headless monitors, and clickthrough windows.
+    /// Excludes frameless HUD overlays, headless monitors, zero-sized windows, and clickthrough windows.
     /// </summary>
     public bool IsManageable
     {
         get
         {
             if (!this.TryGetWindow(out var w)) return false;
+            if (!this.HasConfirmedUi) return false;
+            if (w.Size.HasValue && (w.Size.Value.X <= 0 || w.Size.Value.Y <= 0))
+                return false;
+            if (w.SizeConstraints.HasValue && (w.SizeConstraints.Value.MaximumSize.X <= 0 || w.SizeConstraints.Value.MaximumSize.Y <= 0))
+                return false;
             if (w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
                 w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration) ||
                 w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs) ||
@@ -75,6 +117,7 @@ public class TrackedWindow
             return true;
         }
     }
+
 
     public void BringToFront()
     {

@@ -504,4 +504,99 @@ public class WindowManagerServiceTests
         Assert.True(tw3.TryGetWindow(out var retrieved));
         Assert.Same(winReplacement, retrieved);
     }
+
+    private class DummyConditionalWindow : Window
+    {
+        public bool ConditionResult { get; set; } = true;
+
+        public DummyConditionalWindow(string name) : base(name) { }
+
+        public override bool DrawConditions() => this.ConditionResult;
+
+        public override void Draw() { }
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesWindowsFailingDrawConditions()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyConditionalWindow("Conditional Window")
+        {
+            IsOpen = true,
+            ConditionResult = false
+        };
+
+        var tw = service.RegisterWindow(win);
+
+        Assert.False(tw.PassesDrawConditions);
+        Assert.False(tw.IsOpen);
+
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.DoesNotContain(tw, visible);
+
+        // When condition becomes true, window becomes open and visible
+        win.ConditionResult = true;
+        Assert.True(tw.PassesDrawConditions);
+        Assert.True(tw.IsOpen);
+
+        visible = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(tw, visible);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesZeroSizeWindows()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("ZeroSize Window")
+        {
+            IsOpen = true,
+            Size = System.Numerics.Vector2.Zero
+        };
+
+        var tw = service.RegisterWindow(win);
+
+        Assert.False(tw.IsManageable);
+
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.DoesNotContain(tw, visible);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesZeroMaxConstraintsWindows()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("ZeroConstraints Window")
+        {
+            IsOpen = true,
+            SizeConstraints = new WindowSizeConstraints
+            {
+                MaximumSize = System.Numerics.Vector2.Zero
+            }
+        };
+
+        var tw = service.RegisterWindow(win);
+
+        Assert.False(tw.IsManageable);
+
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.DoesNotContain(tw, visible);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesUnconfirmedUiWindows()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Unconfirmed Window") { IsOpen = true };
+
+        var tw = service.RegisterWindow(win);
+        Assert.True(tw.HasConfirmedUi);
+        Assert.True(tw.IsManageable);
+
+        tw.HasConfirmedUi = false;
+        Assert.False(tw.IsManageable);
+
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.DoesNotContain(tw, visible);
+    }
 }
+
