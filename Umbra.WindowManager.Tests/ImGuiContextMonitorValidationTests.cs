@@ -59,4 +59,26 @@ public class ImGuiContextMonitorValidationTests
     {
         Assert.Equal(expected, ImGuiContextMonitor.IsWindowDocked(dockId, dockNodeVisible));
     }
+
+    [Fact]
+    public void WithWindowMenuButtonSuppressed_SetsInternalNoWindowMenuButtonFlag()
+    {
+        // The down-arrow window-menu button on a docked tab group is hidden via the internal
+        // NoWindowMenuButton dock-node flag (issue #25).
+        var result = ImGuiContextMonitor.WithWindowMenuButtonSuppressed(Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.None);
+
+        Assert.True(((long)result & (long)Dalamud.Bindings.ImGui.ImGuiDockNodeFlagsPrivate.NoWindowMenuButton) != 0);
+    }
+
+    [Fact]
+    public void WithWindowMenuButtonSuppressed_PreservesExistingFlagsAndIsIdempotent()
+    {
+        var withExisting = Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize;
+        var once = ImGuiContextMonitor.WithWindowMenuButtonSuppressed(withExisting);
+        var twice = ImGuiContextMonitor.WithWindowMenuButtonSuppressed(once);
+
+        // Existing flags survive, and re-applying does not change the result.
+        Assert.True((once & Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize) != 0);
+        Assert.Equal(once, twice);
+    }
 }

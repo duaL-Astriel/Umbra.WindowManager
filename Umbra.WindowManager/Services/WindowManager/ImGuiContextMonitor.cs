@@ -199,6 +199,10 @@ public class ImGuiContextMonitor
             {
                 var activeName = this.dockActiveTab.GetValueOrDefault(dockId, members[0].WindowName);
                 this.windowManager.RegisterDockGroup(this.GetDockKey(dockId), activeName, members);
+
+                // Hide ImGui's dock-node window-menu (down-arrow) button on tab groups; like the other
+                // native controls it renders as a stray, obscured button over the tabs (issue #25).
+                this.SuppressDockNodeWindowMenuButton(dockId);
             }
             else if (members.Count == 1 && members[0].DockGroupKey != null)
             {
@@ -229,6 +233,36 @@ public class ImGuiContextMonitor
         }
     }
 
+
+    /// <summary>
+    /// Returns <paramref name="flags"/> with the internal <c>NoWindowMenuButton</c> dock-node flag set.
+    /// This hides ImGui's dock-node window-menu button (the small down-arrow at the corner of a docked
+    /// tab bar), which -- like the other native controls -- is drawn on top of / beneath the docked tab
+    /// contents and reads as a stray, obscured button (issue #25). The flag lives in
+    /// <see cref="ImGuiDockNodeFlagsPrivate"/> (not the public enum), so it is applied via a cast.
+    /// </summary>
+    public static ImGuiDockNodeFlags WithWindowMenuButtonSuppressed(ImGuiDockNodeFlags flags) =>
+        flags | (ImGuiDockNodeFlags)ImGuiDockNodeFlagsPrivate.NoWindowMenuButton;
+
+    /// <summary>
+    /// Sets <see cref="ImGuiDockNodeFlagsPrivate.NoWindowMenuButton"/> on the dock node with the given id
+    /// so its window-menu (down-arrow) button is not drawn. Resolved via <c>DockBuilderGetNode</c> because
+    /// the per-window <c>DockNode</c> pointer reads as null from this hook. Idempotent and best-effort.
+    /// </summary>
+    private void SuppressDockNodeWindowMenuButton(uint dockId)
+    {
+        try
+        {
+            if (dockId == 0) return;
+            var node = ImGuiP.DockBuilderGetNode(dockId);
+            if (!node.IsNull)
+                node.LocalFlags = WithWindowMenuButtonSuppressed(node.LocalFlags);
+        }
+        catch
+        {
+            // Never let a dock-node tweak disrupt the draw loop.
+        }
+    }
 
     private string GetDockKey(uint dockId)
     {
