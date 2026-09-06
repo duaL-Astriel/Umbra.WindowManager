@@ -42,6 +42,8 @@ public class TrackedWindow
 
     public bool TryGetWindow([NotNullWhen(true)] out IWindow? window) => this.windowRef.TryGetTarget(out window);
 
+    public bool IsEligibleWindow => this.IsManageable;
+
     public bool IsOpen
     {
         get => this.TryGetWindow(out var w) && w.IsOpen;
@@ -63,8 +65,10 @@ public class TrackedWindow
         get
         {
             if (!this.TryGetWindow(out var w)) return false;
-            if ((w.Flags & (Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar |
-                           Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs)) != 0)
+            if (w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
+                w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration) ||
+                w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs) ||
+                (w.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs) != 0)
                 return false;
             if (w.IsClickthrough)
                 return false;
