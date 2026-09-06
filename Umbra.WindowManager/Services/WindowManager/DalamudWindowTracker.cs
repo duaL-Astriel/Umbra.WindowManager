@@ -68,6 +68,18 @@ public class DalamudWindowTracker
 
     public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
     {
+        // Dock-group members (docked together as tabs, e.g. Glamourer + Penumbra) have no usable
+        // per-window title bar: Dalamud draws the button inside the client content area where it collides
+        // with and renders beneath the plugin's own controls (issue #25). Suppress it here -- in the single
+        // shared injection routine -- so the background discovery ticks and fast-track paths agree with the
+        // draw loop instead of re-adding the button it just removed. The window regains its button when it
+        // leaves the group (DockGroupKey cleared). Minimizing is still available from the toolbar widget.
+        if (tracked.DockGroupKey != null)
+        {
+            RemoveMinimizeButton(window);
+            return;
+        }
+
         // Overlays and non-interactive windows should not have minimize buttons injected
         if (!CanInjectMinimizeButton(window))
             return;
@@ -133,6 +145,26 @@ public class DalamudWindowTracker
 
         window.TitleBarButtons.Add(button);
         InjectedButtons.AddOrUpdate(window, button);
+    }
+
+    /// <summary>
+    /// Removes the minimize button we injected into <paramref name="window"/>, if present. Docked windows
+    /// in a multi-tab dock node have no real title bar, so Dalamud renders the injected button inside the
+    /// client content area where it collides with (and is drawn beneath) the plugin's own controls,
+    /// making it visually obscured and unclickable (issue #25). For those windows we drop the raw button
+    /// and rely on the toolbar / context-menu minimize actions instead. The window becomes eligible for
+    /// re-injection via <see cref="InjectMinimizeButton"/> once it undocks.
+    /// </summary>
+    public static void RemoveMinimizeButton(IWindow window)
+    {
+        if (window.TitleBarButtons == null)
+            return;
+
+        if (InjectedButtons.TryGetValue(window, out var injected))
+        {
+            window.TitleBarButtons.Remove(injected);
+            InjectedButtons.Remove(window);
+        }
     }
 
     private int isScanning;
