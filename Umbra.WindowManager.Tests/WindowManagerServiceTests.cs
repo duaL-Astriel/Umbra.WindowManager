@@ -598,5 +598,48 @@ public class WindowManagerServiceTests
         var visible = service.GetVisibleAndMinimizedWindows();
         Assert.DoesNotContain(tw, visible);
     }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_MinimizedWindowRetainsManageableEvenIfUiUnconfirmed()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Test Minimized Window") { IsOpen = true };
+
+        var tw = service.RegisterWindow(win);
+        Assert.True(tw.IsManageable);
+
+        // Minimize window
+        service.Minimize(tw);
+        Assert.True(tw.IsMinimized);
+        Assert.False(win.IsOpen);
+
+        // Simulate ImGuiContextMonitor observing no active UI content during/after minimization fade-out
+        tw.HasConfirmedUi = false;
+
+        // Even with HasConfirmedUi == false, a minimized window must remain manageable and in visible/minimized list
+        Assert.True(tw.IsManageable);
+
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(tw, visible);
+    }
+
+    [Fact]
+    public void WindowManagerService_Restore_MaintainsManageableAndConfirmedUi()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Test Restore Window") { IsOpen = true };
+
+        var tw = service.RegisterWindow(win);
+        Assert.True(tw.IsManageable);
+
+        service.Minimize(tw);
+        Assert.True(tw.IsMinimized);
+
+        service.Restore(tw);
+        Assert.False(tw.IsMinimized);
+        Assert.True(tw.IsOpen);
+        Assert.True(tw.IsManageable);
+        Assert.Contains(tw, service.GetVisibleAndMinimizedWindows());
+    }
 }
 

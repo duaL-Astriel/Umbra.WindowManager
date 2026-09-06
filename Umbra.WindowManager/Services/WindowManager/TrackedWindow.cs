@@ -102,7 +102,7 @@ public class TrackedWindow
         get
         {
             if (!this.TryGetWindow(out var w)) return false;
-            if (!this.HasConfirmedUi) return false;
+            if (!this.IsMinimized && !this.HasConfirmedUi) return false;
             if (w.Size.HasValue && (w.Size.Value.X <= 0 || w.Size.Value.Y <= 0))
                 return false;
             if (w.SizeConstraints.HasValue && (w.SizeConstraints.Value.MaximumSize.X <= 0 || w.SizeConstraints.Value.MaximumSize.Y <= 0))

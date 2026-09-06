@@ -73,7 +73,7 @@ public class ImGuiContextMonitor
                 tracked.HasConfirmedUi = true;
                 tracked.UnseenFrames = 0;
             }
-            else
+            else if (!tracked.IsMinimized)
             {
                 tracked.HasConfirmedUi = false;
             }
