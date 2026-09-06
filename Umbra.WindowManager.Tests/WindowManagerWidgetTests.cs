@@ -501,6 +501,75 @@ public class WindowManagerWidgetTests
     }
 
     [Fact]
+    public void Constructor_AssignsScopedStylesheetToRootNode()
+    {
+        // Regression for issue #19: the raw root Node had no stylesheet, so the ".decorated" class
+        // produced no visual change. The widget must attach a stylesheet to its subtree.
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        Assert.NotNull(widget.Node.Stylesheet);
+    }
+
+    [Fact]
+    public void WindowButton_HasWindowBtnClassForStylesheetScoping()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("StyledWindow");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["StyledWindow"];
+        Assert.Contains("window-btn", btnNode.ClassList);
+    }
+
+    [Fact]
+    public void DropdownNode_HasDropdownBtnClassForStylesheetScoping()
+    {
+        var ddNode = WindowManagerWidget.CreateDropdownNode();
+        Assert.Contains("dropdown-btn", ddNode.ClassList);
+    }
+
+    [Fact]
+    public void Stylesheet_DefinesDecoratedBackgroundBorderHoverAndActiveStyles()
+    {
+        // The stylesheet must wire the decorated states to Umbra's themed color tokens so that
+        // toggling "Decorate" actually changes the button background/border (issue #19).
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        var rules = widget.Node.Stylesheet!.GetRuleList();
+
+        // Every rule is scoped to the widget's own button classes; nothing leaks to bare selectors.
+        Assert.All(rules.Keys, selector =>
+            Assert.True(selector.Contains("window-btn") || selector.Contains("dropdown-btn"),
+                $"Unscoped stylesheet selector: {selector}"));
+
+        var backgroundNames = rules.Values
+            .Where(s => s.BackgroundColor is { } c && !string.IsNullOrEmpty(c.Name))
+            .Select(s => s.BackgroundColor!.Value.Name)
+            .ToHashSet();
+        var borderNames = rules.Values
+            .Where(s => s.BorderColor is { Top: { } t } && !string.IsNullOrEmpty(t.Name))
+            .Select(s => s.BorderColor!.Value.Top!.Value.Name)
+            .ToHashSet();
+
+        Assert.Contains("Widget.Background", backgroundNames);
+        Assert.Contains("Widget.BackgroundHover", backgroundNames);
+        Assert.Contains("Widget.Border", borderNames);
+        Assert.Contains("Widget.BorderHover", borderNames);
+
+        // Base decorated rule draws a border.
+        Assert.Contains(rules.Values, s => s.BorderWidth is { } w && w.Top > 0);
+
+        // Hover and focused (.active) states are both represented.
+        Assert.Contains(rules.Keys, k => k.Contains(":hover"));
+        Assert.Contains(rules.Keys, k => k.Contains(".active"));
+    }
+
+    [Fact]
     public void WindowButton_IconNode_HasExplicitSizeAndScaleMode()
     {
         var service = new WindowManagerService();
