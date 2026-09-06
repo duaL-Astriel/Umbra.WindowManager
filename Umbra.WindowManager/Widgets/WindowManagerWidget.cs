@@ -65,6 +65,8 @@ public class WindowManagerWidget : ToolbarWidget
     private int maxTitleWidth = 140;
     private bool groupDockedTabs = true;
     private bool decorate = true;
+    private string? lastFocusedWindowName;
+    private long lastFocusedTick;
 
     public WindowManagerWidget(
         WidgetInfo info,
@@ -259,6 +261,11 @@ public class WindowManagerWidget : ToolbarWidget
             var w = this.windowsBuffer[i];
             this.currentWindows[w.WindowName] = w;
             this.currentNames.Add(w.WindowName);
+            if (w.IsFocused)
+            {
+                this.lastFocusedWindowName = w.WindowName;
+                this.lastFocusedTick = Environment.TickCount64;
+            }
         }
 
         this.effectiveMode = this.ResolveEffectiveMode(this.windowsBuffer.Count);
@@ -414,10 +421,29 @@ public class WindowManagerWidget : ToolbarWidget
         };
 
         // Bind by stable window name and resolve the live TrackedWindow at click time (issue #2).
+        var wasFocused = false;
+        node.OnMouseDown += _ =>
+        {
+            if (this.currentWindows.TryGetValue(windowName, out var w))
+            {
+                wasFocused = w.IsFocused
+                    || node.ClassList.Contains("active")
+                    || (this.lastFocusedWindowName == windowName && Environment.TickCount64 - this.lastFocusedTick < 1000);
+            }
+        };
         node.OnClick += _ =>
         {
             if (this.currentWindows.TryGetValue(windowName, out var w))
-                this.windowManager.Toggle(w);
+            {
+                var focused = wasFocused
+                    || w.IsFocused
+                    || node.ClassList.Contains("active")
+                    || (this.lastFocusedWindowName == windowName && Environment.TickCount64 - this.lastFocusedTick < 1000);
+                wasFocused = false;
+                if (focused)
+                    this.lastFocusedWindowName = null;
+                this.windowManager.Toggle(w, focused);
+            }
         };
         node.OnRightClick += _ =>
         {
@@ -583,7 +609,13 @@ public class WindowManagerWidget : ToolbarWidget
                         OnClick = () =>
                         {
                             if (this.currentWindows.TryGetValue(windowName, out var w))
-                                this.windowManager.Toggle(w);
+                            {
+                                var focused = w.IsFocused
+                                    || (this.lastFocusedWindowName == windowName && Environment.TickCount64 - this.lastFocusedTick < 2000);
+                                if (focused)
+                                    this.lastFocusedWindowName = null;
+                                this.windowManager.Toggle(w, focused);
+                            }
                         }
                     };
                     popup.Add(btn);

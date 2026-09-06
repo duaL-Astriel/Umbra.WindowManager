@@ -115,13 +115,14 @@ public class WindowManagerService
         }
     }
 
-    public void Toggle(TrackedWindow tracked)
+    public void Toggle(TrackedWindow tracked, bool? wasFocused = null)
     {
+        var isFocused = wasFocused ?? tracked.IsFocused;
         if (tracked.IsMinimized || !tracked.IsOpen)
         {
             this.Restore(tracked);
         }
-        else if (tracked.IsFocused)
+        else if (isFocused)
         {
             this.Minimize(tracked);
         }
