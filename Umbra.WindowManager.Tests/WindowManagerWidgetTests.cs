@@ -43,6 +43,7 @@ public class WindowManagerWidgetTests
         Assert.Equal("Auto", widget.DisplayMode);
         Assert.Equal(140, widget.MaxTitleWidth);
         Assert.True(widget.GroupDockedTabs);
+        Assert.True(widget.Decorate);
     }
 
     [Fact]
@@ -350,10 +351,23 @@ public class WindowManagerWidgetTests
         var vars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
 
         Assert.NotNull(vars);
-        Assert.Equal(3, vars.Count);
+        Assert.Equal(4, vars.Count);
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
+        var decorateVar = vars.OfType<BooleanWidgetConfigVariable>().FirstOrDefault(v => v.Id == "Decorate");
+        Assert.NotNull(decorateVar);
+        Assert.Equal("General", decorateVar.Category);
+        Assert.Equal("Window Manager", decorateVar.Group);
+    }
+
+    [Fact]
+    public void Decorate_ReadsFromDecorateConfigVariable_WhenPresent()
+    {
+        var info = new WidgetInfo("WindowManagerWidget", "Window Manager", "Window manager widget");
+        var configs = new Dictionary<string, object> { { "Decorate", false } };
+        var widget = new WindowManagerWidget(info, null, configs, new WindowManagerService());
+        Assert.False(widget.Decorate);
     }
 
     [Fact]
@@ -370,5 +384,57 @@ public class WindowManagerWidgetTests
 
         widget.GroupDockedTabs = false;
         Assert.False(widget.GroupDockedTabs);
+
+        widget.Decorate = false;
+        Assert.False(widget.Decorate);
+    }
+
+    [Fact]
+    public void UpdateButtons_AppliesDecoratedClassWhenDecorateIsTrue()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("TestWindow");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.Decorate = true;
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["TestWindow"];
+        Assert.Contains("decorated", btnNode.ClassList);
+    }
+
+    [Fact]
+    public void UpdateButtons_OmitsDecoratedClassWhenDecorateIsFalse()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("TestWindow");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.Decorate = false;
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["TestWindow"];
+        Assert.DoesNotContain("decorated", btnNode.ClassList);
+    }
+
+    [Fact]
+    public void RenderDropdown_TogglesDecoratedClassOnDropdownNode()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("TestWindow");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Dropdown";
+
+        widget.Decorate = true;
+        widget.UpdateButtons();
+        Assert.Contains("decorated", widget.Node.ChildNodes[0].ClassList);
+
+        widget.Decorate = false;
+        widget.UpdateButtons();
+        Assert.DoesNotContain("decorated", widget.Node.ChildNodes[0].ClassList);
     }
 }

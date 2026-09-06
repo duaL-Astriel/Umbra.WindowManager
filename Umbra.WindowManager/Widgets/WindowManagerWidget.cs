@@ -31,6 +31,7 @@ public class WindowManagerWidget : ToolbarWidget
     private string displayMode = "Auto";
     private int maxTitleWidth = 140;
     private bool groupDockedTabs = true;
+    private bool decorate = true;
 
     public WindowManagerWidget(
         WidgetInfo info,
@@ -48,6 +49,21 @@ public class WindowManagerWidget : ToolbarWidget
     ) : base(info, guid, configValues)
     {
         this.windowManager = windowManager ?? Framework.Service<WindowManagerService>();
+
+        if (configValues != null)
+        {
+            if (configValues.TryGetValue("WindowManager.DisplayMode", out var dm) && dm is string dms)
+                this.displayMode = dms;
+            if (configValues.TryGetValue("WindowManager.MaxTitleWidth", out var mtw) && mtw is int mtwi)
+                this.maxTitleWidth = mtwi;
+            if (configValues.TryGetValue("WindowManager.GroupDockedTabs", out var gdt) && gdt is bool gdtb)
+                this.groupDockedTabs = gdtb;
+            if (configValues.TryGetValue("Decorate", out var dec) && dec is bool decb)
+                this.decorate = decb;
+            else if (configValues.TryGetValue("WindowManager.Decorate", out var wmDec) && wmDec is bool wmDecb)
+                this.decorate = wmDecb;
+        }
+
         this.rootNode = new Node
         {
             Style =
@@ -110,6 +126,27 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
+    [ConfigVariable("Decorate", "General", "Window Manager")]
+    public bool Decorate
+    {
+        get
+        {
+            if (this.HasConfigVariable("Decorate"))
+                return this.GetConfigValue<bool>("Decorate");
+            if (this.HasConfigVariable("WindowManager.Decorate"))
+                return this.GetConfigValue<bool>("WindowManager.Decorate");
+            return this.decorate;
+        }
+        set
+        {
+            this.decorate = value;
+            if (this.HasConfigVariable("Decorate"))
+                this.SetConfigValue("Decorate", value);
+            if (this.HasConfigVariable("WindowManager.Decorate"))
+                this.SetConfigValue("WindowManager.Decorate", value);
+        }
+    }
+
     protected override void Initialize()
     {
     }
@@ -136,7 +173,11 @@ public class WindowManagerWidget : ToolbarWidget
                     { "Dropdown", "Dropdown" }
                 },
                 false
-            ),
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            },
             new IntegerWidgetConfigVariable(
                 "WindowManager.MaxTitleWidth",
                 "Max Title Width",
@@ -144,13 +185,31 @@ public class WindowManagerWidget : ToolbarWidget
                 140,
                 60,
                 300
-            ),
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            },
             new BooleanWidgetConfigVariable(
                 "WindowManager.GroupDockedTabs",
                 "Group Docked Tabs",
                 "Group docked tabs together in toolbar.",
                 true
             )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            },
+            new BooleanWidgetConfigVariable(
+                "Decorate",
+                "Decorate",
+                "Decorate window buttons with Umbra background and border styling.",
+                true
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            }
         ];
     }
 
@@ -320,6 +379,7 @@ public class WindowManagerWidget : ToolbarWidget
         btnNode.ToggleClass("open", window.IsOpen);
         btnNode.ToggleClass("minimized", window.IsMinimized);
         btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
+        btnNode.ToggleClass("decorated", this.Decorate);
 
         btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
         btnNode.Tooltip = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
@@ -405,31 +465,47 @@ public class WindowManagerWidget : ToolbarWidget
 
     private void RenderDropdown()
     {
-        var popup = this.EnsureMenuPopup();
-        popup.Clear(true);
-
-        for (var i = 0; i < this.windowsBuffer.Count; i++)
+        if (this.EnsureMenuPopup() is { } popup)
         {
-            var window = this.windowsBuffer[i];
-            var windowName = window.WindowName;
-            var label = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+            popup.Clear(true);
 
-            popup.Add(new MenuPopup.Button(label)
+            for (var i = 0; i < this.windowsBuffer.Count; i++)
             {
-                Id = windowName,
-                OnClick = () =>
+                var window = this.windowsBuffer[i];
+                var windowName = window.WindowName;
+                var label = $"{window.CleanTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+
+                popup.Add(new MenuPopup.Button(label)
                 {
-                    if (this.currentWindows.TryGetValue(windowName, out var w))
-                        this.windowManager.Toggle(w);
-                }
-            });
+                    Id = windowName,
+                    OnClick = () =>
+                    {
+                        if (this.currentWindows.TryGetValue(windowName, out var w))
+                            this.windowManager.Toggle(w);
+                    }
+                });
+            }
         }
 
         if (this.dropdownNode is { } dn)
+        {
             dn.ChildNodes[1].NodeValue = this.windowsBuffer.Count.ToString();
+            dn.ToggleClass("decorated", this.Decorate);
+        }
     }
 
-    private MenuPopup EnsureMenuPopup() => this.menuPopup ??= new MenuPopup();
+    private MenuPopup? EnsureMenuPopup()
+    {
+        if (this.menuPopup != null) return this.menuPopup;
+        try
+        {
+            return this.menuPopup = new MenuPopup();
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     // --- Context menu (issue #3) --------------------------------------------------------------------
 
