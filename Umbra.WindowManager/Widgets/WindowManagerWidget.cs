@@ -311,19 +311,34 @@ public class WindowManagerWidget : ToolbarWidget
             Style =
             {
                 Flow = Flow.Horizontal,
-                Gap = 4,
+                Gap = 6,
                 Padding = new EdgeSize(4, 6, 4, 6),
                 BorderRadius = 4,
-                RoundedCorners = RoundedCorners.All
+                RoundedCorners = RoundedCorners.All,
+                Anchor = Anchor.MiddleCenter
             },
             ChildNodes =
             {
-                new Node { Id = "icon" },
+                new Node
+                {
+                    Id = "icon",
+                    Style =
+                    {
+                        Size = new Size(18, 18),
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter,
+                        FontSize = 12,
+                        ImageScaleMode = ImageScaleMode.Adapt,
+                        ImageRounding = 3
+                    }
+                },
                 new Node
                 {
                     Id = "label",
                     Style =
                     {
+                        Anchor = Anchor.MiddleLeft,
+                        TextAlign = Anchor.MiddleLeft,
                         WordWrap = false,
                         TextOverflow = false // clip + ellipsize instead of overflowing (issue #8.4)
                     }
@@ -504,6 +519,18 @@ public class WindowManagerWidget : ToolbarWidget
                 };
                 popup.Add(btn);
                 this.dropdownButtons[windowName] = btn;
+            }
+
+            if (window.IconBytes != null)
+            {
+                var iconNode = btn.Node.QuerySelector(".icon");
+                if (iconNode != null)
+                {
+                    if (!ReferenceEquals(iconNode.Style.ImageBytes, window.IconBytes))
+                        iconNode.Style.ImageBytes = window.IconBytes;
+                    if (iconNode.NodeValue != null)
+                        iconNode.NodeValue = null;
+                }
             }
 
             if (!Equals(btn.Label, label))

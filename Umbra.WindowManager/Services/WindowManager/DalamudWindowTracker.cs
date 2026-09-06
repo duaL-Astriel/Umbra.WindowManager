@@ -159,6 +159,29 @@ public class DalamudWindowTracker
             var installedProp = pmType.GetProperty("InstalledPlugins", BindingFlags.Public | BindingFlags.Instance);
             if (installedProp?.GetValue(pmInstance) is not IEnumerable installedPlugins) return;
 
+            Dictionary<string, string>? availableIconUrls = null;
+            try
+            {
+                var availableProp = pmType.GetProperty("AvailablePlugins", BindingFlags.Public | BindingFlags.Instance);
+                if (availableProp?.GetValue(pmInstance) is IEnumerable availablePlugins)
+                {
+                    availableIconUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var remotePlugin in availablePlugins)
+                    {
+                        if (remotePlugin == null) continue;
+                        var rType = remotePlugin.GetType();
+                        var rName = rType.GetProperty("InternalName")?.GetValue(remotePlugin) as string;
+                        var rIcon = rType.GetProperty("IconUrl")?.GetValue(remotePlugin) as string;
+                        if (!string.IsNullOrEmpty(rName) && !string.IsNullOrWhiteSpace(rIcon))
+                            availableIconUrls[rName] = rIcon;
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort
+            }
+
             foreach (var localPlugin in installedPlugins)
             {
                 if (localPlugin == null) continue;
@@ -171,7 +194,7 @@ public class DalamudWindowTracker
                 var pluginObj = pluginInstanceField?.GetValue(localPlugin);
                 if (pluginObj == null) continue;
 
-                this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest);
+                this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
                 try
                 {
                     this.ScanObjectForWindowSystems(pluginObj);
@@ -196,7 +219,7 @@ public class DalamudWindowTracker
     /// Resolves the owning plugin's internal name and icon bytes from a Dalamud <c>LocalPlugin</c>
     /// object via reflection. Best-effort: returns whatever could be resolved, or an empty context.
     /// </summary>
-    internal PluginContext ResolvePluginContext(object localPlugin, object? manifest = null)
+    internal PluginContext ResolvePluginContext(object localPlugin, object? manifest = null, IReadOnlyDictionary<string, string>? availableIconUrls = null)
     {
         try
         {
@@ -204,6 +227,10 @@ public class DalamudWindowTracker
             manifest ??= lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
             var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string;
             var iconUrl = manifest?.GetType().GetProperty("IconUrl")?.GetValue(manifest) as string;
+            if (string.IsNullOrWhiteSpace(iconUrl) && !string.IsNullOrEmpty(internalName) && availableIconUrls != null)
+            {
+                availableIconUrls.TryGetValue(internalName, out iconUrl);
+            }
 
             byte[]? icon = null;
             if (!string.IsNullOrEmpty(internalName))
