@@ -28,6 +28,10 @@ public class DalamudWindowTracker
     private readonly ConcurrentDictionary<string, byte> pendingDownloads = new();
     private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
+    // Discovered WindowSystem instances with their associated plugin context, polled on a fast tick
+    // to discover dynamically added windows without reflection latency.
+    private readonly ConcurrentDictionary<WindowSystem, PluginContext> knownWindowSystems = new();
+
     // Plugin context for the discovery pass currently in progress; read by TrackWindowSystem.
     private PluginContext? currentPluginContext;
 
@@ -41,37 +45,39 @@ public class DalamudWindowTracker
         this.ScanPlugins();
     }
 
-    public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
+    /// <summary>
+    /// Evaluates whether a window has a title bar and is capable of receiving interactive title bar buttons.
+    /// Unlike toolbar manageability, this does not require pre-confirmed ImGui drawing or positive pre-render size.
+    /// </summary>
+    public static bool CanInjectMinimizeButton(IWindow window)
     {
         if (window.TitleBarButtons == null)
+            return false;
+
+        if (window.IsClickthrough)
+            return false;
+
+        if (window.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
+            window.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration) ||
+            window.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs) ||
+            (window.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs) != 0)
+            return false;
+
+        return true;
+    }
+
+    public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
+    {
+        // Overlays and non-interactive windows should not have minimize buttons injected
+        if (!CanInjectMinimizeButton(window))
             return;
 
-        // Overlays and non-interactive windows should not have minimize buttons injected
-        if (!tracked.IsManageable)
+        // Idempotent fast exit: if our button is already injected and present, return immediately
+        if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
             return;
 
         // Suppress native ImGui collapse triangle in favor of toolbar minimization
         window.Flags |= Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse;
-
-        // Hook any plugin-provided minimize buttons so clicking them also delegates to WindowManagerService.Minimize
-        for (var i = 0; i < window.TitleBarButtons.Count; i++)
-        {
-            var b = window.TitleBarButtons[i];
-            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
-            {
-                var origClick = b.Click;
-                b.Click = mb =>
-                {
-                    origClick?.Invoke(mb);
-                    service.Minimize(tracked);
-                };
-            }
-        }
-        // Idempotent per window *instance* rather than per icon: a plugin may ship its own
-        // WindowMinimize button, and we must still inject (and stay bound to) our own. Matching on
-        // icon alone would skip injection and leave our minimize action unwired (issue #8.1).
-        if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
-            return;
 
         // Clean up any duplicate minimize buttons accumulated across assembly hot-reloads
         TitleBarButton? existingInList = null;
@@ -98,6 +104,21 @@ public class DalamudWindowTracker
             return;
         }
 
+        // Hook any plugin-provided minimize buttons so clicking them also delegates to WindowManagerService.Minimize
+        for (var i = 0; i < window.TitleBarButtons.Count; i++)
+        {
+            var b = window.TitleBarButtons[i];
+            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
+            {
+                var origClick = b.Click;
+                b.Click = mb =>
+                {
+                    origClick?.Invoke(mb);
+                    service.Minimize(tracked);
+                };
+            }
+        }
+
         var button = new TitleBarButton
         {
             Icon = FontAwesomeIcon.WindowMinimize,
@@ -114,9 +135,14 @@ public class DalamudWindowTracker
         InjectedButtons.AddOrUpdate(window, button);
     }
 
+    private int isScanning;
+
     [OnTick(interval: 2000)]
     public void ScanPlugins()
     {
+        if (System.Threading.Interlocked.CompareExchange(ref this.isScanning, 1, 0) != 0)
+            return;
+
         try
         {
             var logAssembly = typeof(Dalamud.Plugin.Services.IPluginLog).Assembly;
@@ -343,6 +369,74 @@ public class DalamudWindowTracker
 
     private void ScanObjectForWindowSystems(object obj)
     {
+        var visited = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        this.ScanObjectForWindowSystemsRecursive(obj, 0, 6, visited);
+    }
+
+    private void ScanObjectForWindowSystemsRecursive(object obj, int currentDepth, int maxDepth, HashSet<object> visited)
+    {
+        if (obj == null || !visited.Add(obj))
+            return;
+
+        if (obj is WindowSystem directWs)
+        {
+            this.TrackWindowSystem(directWs);
+            return;
+        }
+
+        if (obj is IWindow directWindow)
+        {
+            this.TrackSingleWindow(directWindow);
+            return;
+        }
+
+        if (currentDepth >= maxDepth)
+            return;
+
+        // Unpack DI containers (e.g. Luna.ServiceManager, Microsoft.Extensions.DependencyInjection, etc.)
+        this.TryScanServiceProvider(obj, currentDepth, maxDepth, visited);
+
+        if (obj is IEnumerable enumerable and not string and not byte[])
+        {
+            var count = 0;
+            foreach (var item in enumerable)
+            {
+                if (++count > 50) break;
+                if (item == null) continue;
+
+                var actualItem = item;
+                if (actualItem is DictionaryEntry de)
+                {
+                    actualItem = de.Value;
+                }
+                else
+                {
+                    var itemType = actualItem.GetType();
+                    if (itemType.IsGenericType && itemType.GetGenericTypeDefinition() == typeof(KeyValuePair<,>))
+                    {
+                        actualItem = itemType.GetProperty("Value")?.GetValue(actualItem);
+                    }
+                }
+
+                if (actualItem is WindowSystem itemWs)
+                {
+                    this.TrackWindowSystem(itemWs);
+                }
+                else if (actualItem is IWindow itemWin)
+                {
+                    this.TrackSingleWindow(itemWin);
+                }
+                else if (actualItem != null && currentDepth < maxDepth)
+                {
+                    var ait = actualItem.GetType();
+                    if (IsUiOrServiceType(ait) || ShouldTraverseMemberName(ait.Name))
+                    {
+                        this.ScanObjectForWindowSystemsRecursive(actualItem, currentDepth + 1, maxDepth, visited);
+                    }
+                }
+            }
+        }
+
         var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
 
         for (var currentType = obj.GetType(); currentType != null && currentType != typeof(object); currentType = currentType.BaseType)
@@ -351,10 +445,34 @@ public class DalamudWindowTracker
             {
                 try
                 {
-                    if (prop.CanRead && prop.GetIndexParameters().Length == 0 && typeof(WindowSystem).IsAssignableFrom(prop.PropertyType))
+                    if (prop.CanRead && prop.GetIndexParameters().Length == 0)
                     {
-                        if (prop.GetValue(obj) is WindowSystem ws)
-                            this.TrackWindowSystem(ws);
+                        if (typeof(WindowSystem).IsAssignableFrom(prop.PropertyType))
+                        {
+                            if (prop.GetValue(obj) is WindowSystem ws)
+                                this.TrackWindowSystem(ws);
+                        }
+                        else if (typeof(IWindow).IsAssignableFrom(prop.PropertyType))
+                        {
+                            if (prop.GetValue(obj) is IWindow w)
+                                this.TrackSingleWindow(w);
+                        }
+                        else if (currentDepth < maxDepth && ShouldTraverseProperty(prop))
+                        {
+                            var val = prop.GetValue(obj);
+                            if (val is WindowSystem ws)
+                            {
+                                this.TrackWindowSystem(ws);
+                            }
+                            else if (val is IWindow w)
+                            {
+                                this.TrackSingleWindow(w);
+                            }
+                            else if (val != null && ShouldTraverseType(val.GetType()))
+                            {
+                                this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
+                            }
+                        }
                     }
                 }
                 catch
@@ -372,6 +490,27 @@ public class DalamudWindowTracker
                         if (field.GetValue(obj) is WindowSystem ws)
                             this.TrackWindowSystem(ws);
                     }
+                    else if (typeof(IWindow).IsAssignableFrom(field.FieldType))
+                    {
+                        if (field.GetValue(obj) is IWindow w)
+                            this.TrackSingleWindow(w);
+                    }
+                    else if (currentDepth < maxDepth && ShouldTraverseField(field))
+                    {
+                        var val = field.GetValue(obj);
+                        if (val is WindowSystem ws)
+                        {
+                            this.TrackWindowSystem(ws);
+                        }
+                        else if (val is IWindow w)
+                        {
+                            this.TrackSingleWindow(w);
+                        }
+                        else if (val != null && ShouldTraverseType(val.GetType()))
+                        {
+                            this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
+                        }
+                    }
                 }
                 catch
                 {
@@ -381,6 +520,255 @@ public class DalamudWindowTracker
         }
     }
 
+    private void TryScanServiceProvider(object obj, int currentDepth, int maxDepth, HashSet<object> visited)
+    {
+        try
+        {
+            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+            var objType = obj.GetType();
+
+            var isServiceProvider = typeof(IServiceProvider).IsAssignableFrom(objType) ||
+                                   objType.Name.Contains("ServiceProvider");
+
+            if (isServiceProvider)
+            {
+                if (obj is IServiceProvider sp)
+                {
+                    try
+                    {
+                        if (sp.GetService(typeof(WindowSystem)) is WindowSystem directWs)
+                        {
+                            this.TrackWindowSystem(directWs);
+                        }
+                    }
+                    catch
+                    {
+                        // Best effort: GetService may throw for unregistered types
+                    }
+                }
+
+                // Microsoft DI: inspect root engine scope
+                var root = objType.GetProperty("Root", flags)?.GetValue(obj)
+                        ?? objType.GetProperty("_root", flags)?.GetValue(obj)
+                        ?? objType.GetField("<Root>k__BackingField", flags)?.GetValue(obj)
+                        ?? objType.GetField("<_root>k__BackingField", flags)?.GetValue(obj)
+                        ?? objType.GetField("_root", flags)?.GetValue(obj)
+                        ?? obj;
+                var rootType = root.GetType();
+
+                // Extract resolved singleton services
+                var dict = (rootType.GetProperty("ResolvedServices", flags)?.GetValue(root)
+                         ?? rootType.GetProperty("_resolvedServices", flags)?.GetValue(root)
+                         ?? rootType.GetField("<ResolvedServices>k__BackingField", flags)?.GetValue(root)
+                         ?? rootType.GetField("<_resolvedServices>k__BackingField", flags)?.GetValue(root)
+                         ?? rootType.GetField("_resolvedServices", flags)?.GetValue(root)
+                         ?? rootType.GetField("ResolvedServices", flags)?.GetValue(root)) as IDictionary;
+
+                if (dict != null)
+                {
+                    foreach (var val in dict.Values)
+                    {
+                        if (val == null) continue;
+                        if (val is WindowSystem ws)
+                        {
+                            this.TrackWindowSystem(ws);
+                        }
+                        else if (val is IWindow w)
+                        {
+                            this.TrackSingleWindow(w);
+                        }
+                        else if (currentDepth < maxDepth && (IsUiOrServiceType(val.GetType()) || ShouldTraverseMemberName(val.GetType().Name)))
+                        {
+                            this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
+                        }
+                    }
+                }
+
+                // Extract disposables list
+                var disposables = (rootType.GetProperty("Disposables", flags)?.GetValue(root)
+                                ?? rootType.GetProperty("_disposables", flags)?.GetValue(root)
+                                ?? rootType.GetField("<Disposables>k__BackingField", flags)?.GetValue(root)
+                                ?? rootType.GetField("<_disposables>k__BackingField", flags)?.GetValue(root)
+                                ?? rootType.GetField("_disposables", flags)?.GetValue(root)) as IEnumerable;
+
+                if (disposables != null)
+                {
+                    var dCount = 0;
+                    foreach (var d in disposables)
+                    {
+                        if (++dCount > 100) break;
+                        if (d == null) continue;
+                        if (d is WindowSystem ws)
+                        {
+                            this.TrackWindowSystem(ws);
+                        }
+                        else if (d is IWindow w)
+                        {
+                            this.TrackSingleWindow(w);
+                        }
+                        else if (currentDepth < maxDepth && (IsUiOrServiceType(d.GetType()) || ShouldTraverseMemberName(d.GetType().Name)))
+                        {
+                            this.ScanObjectForWindowSystemsRecursive(d, currentDepth + 1, maxDepth, visited);
+                        }
+                    }
+                }
+            }
+
+            // Luna.ServiceManager or similar service managers:
+            // Check for _ownedObjects (HashSet<IDisposable>)
+            var ownedField = objType.GetField("_ownedObjects", flags)
+                          ?? objType.GetField("<_ownedObjects>k__BackingField", flags);
+            var owned = (ownedField?.GetValue(obj)
+                      ?? objType.GetProperty("_ownedObjects", flags)?.GetValue(obj)
+                      ?? objType.GetProperty("OwnedObjects", flags)?.GetValue(obj)) as IEnumerable;
+
+            if (owned != null)
+            {
+                var oCount = 0;
+                foreach (var o in owned)
+                {
+                    if (++oCount > 100) break;
+                    if (o == null) continue;
+                    if (o is WindowSystem ws)
+                    {
+                        this.TrackWindowSystem(ws);
+                    }
+                    else if (o is IWindow w)
+                    {
+                        this.TrackSingleWindow(w);
+                    }
+                    else if (currentDepth < maxDepth && (IsUiOrServiceType(o.GetType()) || ShouldTraverseMemberName(o.GetType().Name)))
+                    {
+                        this.ScanObjectForWindowSystemsRecursive(o, currentDepth + 1, maxDepth, visited);
+                    }
+                }
+            }
+
+            // Check for Provider property on service managers (e.g. Luna.ServiceManager.Provider)
+            var provProp = objType.GetProperty("Provider", flags) ?? objType.GetProperty("Services", flags);
+            if (provProp != null && provProp.CanRead && provProp.GetIndexParameters().Length == 0)
+            {
+                var provVal = provProp.GetValue(obj);
+                if (provVal != null && provVal != obj && currentDepth < maxDepth)
+                {
+                    this.ScanObjectForWindowSystemsRecursive(provVal, currentDepth + 1, maxDepth, visited);
+                }
+            }
+        }
+        catch
+        {
+            // Best effort DI inspection
+        }
+    }
+
+    private static bool IsUiOrServiceType(Type type)
+    {
+        return type.Name.Contains("Window", StringComparison.OrdinalIgnoreCase) ||
+               type.Name.Contains("Ui", StringComparison.OrdinalIgnoreCase) ||
+               type.Name.Contains("Gui", StringComparison.OrdinalIgnoreCase) ||
+               type.Namespace?.Contains("Gui", StringComparison.OrdinalIgnoreCase) == true ||
+               type.Namespace?.Contains("Ui", StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static bool ShouldTraverseType(Type type)
+    {
+        if (type == typeof(object))
+            return true;
+
+        if (type.IsPrimitive || type.IsEnum || type.IsValueType || type == typeof(string) || type == typeof(byte[]))
+            return false;
+
+        if (typeof(Delegate).IsAssignableFrom(type) || typeof(MemberInfo).IsAssignableFrom(type) || typeof(Assembly).IsAssignableFrom(type))
+            return false;
+
+        var ns = type.Namespace;
+        if (ns != null)
+        {
+            if (ns.StartsWith("System.") || ns == "System")
+            {
+                return typeof(IEnumerable).IsAssignableFrom(type) ||
+                       typeof(IServiceProvider).IsAssignableFrom(type);
+            }
+
+            if (ns.StartsWith("Microsoft."))
+            {
+                return typeof(IEnumerable).IsAssignableFrom(type) ||
+                       typeof(IServiceProvider).IsAssignableFrom(type) ||
+                       type.Name.Contains("ServiceProvider") ||
+                       type.Name.Contains("ServiceScope") ||
+                       type.Name.Contains("Engine");
+            }
+
+            // Skip Dalamud internal services / API types, except WindowSystem and Window
+            if (ns.StartsWith("Dalamud") && !typeof(WindowSystem).IsAssignableFrom(type) && !typeof(IWindow).IsAssignableFrom(type))
+                return false;
+
+            if (ns.StartsWith("ImGuiNET") || ns.StartsWith("Dalamud.Bindings.ImGui") || ns.StartsWith("FFXIVClientStructs") || ns.StartsWith("Lumina"))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool ShouldTraverseMemberName(string name)
+    {
+        return name.Contains("Ui", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Window", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Manager", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("View", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Service", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Container", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Provider", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Root", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Owned", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("Node", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ShouldTraverseField(FieldInfo field)
+    {
+        if (typeof(WindowSystem).IsAssignableFrom(field.FieldType) || typeof(IWindow).IsAssignableFrom(field.FieldType))
+            return true;
+
+        if (!ShouldTraverseType(field.FieldType))
+            return false;
+
+        return ShouldTraverseMemberName(field.Name) ||
+               ShouldTraverseMemberName(field.FieldType.Name) ||
+               ShouldTraverseMemberName(field.DeclaringType?.Name ?? "");
+    }
+
+    private static bool ShouldTraverseProperty(PropertyInfo prop)
+    {
+        if (typeof(WindowSystem).IsAssignableFrom(prop.PropertyType) || typeof(IWindow).IsAssignableFrom(prop.PropertyType))
+            return true;
+
+        if (!prop.CanRead || prop.GetIndexParameters().Length > 0 || !ShouldTraverseType(prop.PropertyType))
+            return false;
+
+        return ShouldTraverseMemberName(prop.Name) ||
+               ShouldTraverseMemberName(prop.PropertyType.Name) ||
+               ShouldTraverseMemberName(prop.DeclaringType?.Name ?? "") ||
+               typeof(IEnumerable).IsAssignableFrom(prop.PropertyType) ||
+               typeof(IServiceProvider).IsAssignableFrom(prop.PropertyType);
+    }
+
+    public void TrackSingleWindow(IWindow window)
+    {
+        this.TrackSingleWindow(window, this.currentPluginContext?.InternalName, this.currentPluginContext?.IconBytes);
+    }
+
+    public void TrackSingleWindow(IWindow window, string? pluginInternalName, byte[]? iconBytes)
+    {
+        if (string.IsNullOrWhiteSpace(window.WindowName)) return;
+
+        var tw = this.windowManagerService.RegisterWindow(window);
+
+        if (pluginInternalName != null) tw.PluginInternalName = pluginInternalName;
+        if (iconBytes != null) tw.IconBytes = iconBytes;
+
+        InjectMinimizeButton(window, tw, this.windowManagerService);
+    }
+
     public void TrackWindowSystem(WindowSystem ws)
     {
         this.TrackWindowSystem(ws, this.currentPluginContext?.InternalName, this.currentPluginContext?.IconBytes);
@@ -388,6 +776,8 @@ public class DalamudWindowTracker
 
     public void TrackWindowSystem(WindowSystem ws, string? pluginInternalName, byte[]? iconBytes)
     {
+        this.knownWindowSystems[ws] = new PluginContext(pluginInternalName, iconBytes);
+
         foreach (var window in ws.Windows)
         {
             if (string.IsNullOrWhiteSpace(window.WindowName)) continue;
@@ -399,6 +789,58 @@ public class DalamudWindowTracker
 
             InjectMinimizeButton(window, tw, this.windowManagerService);
         }
+    }
+
+    /// <summary>
+    /// Fast-path periodic check across known <see cref="WindowSystem"/> instances to discover
+    /// dynamically added windows without full plugin reflection latency.
+    /// </summary>
+    [OnTick(interval: 250)]
+    public void ScanKnownWindowSystems()
+    {
+        foreach (var (ws, context) in this.knownWindowSystems)
+        {
+            foreach (var window in ws.Windows)
+            {
+                if (string.IsNullOrWhiteSpace(window.WindowName)) continue;
+
+                var tw = this.windowManagerService.RegisterWindow(window);
+
+                if (context.InternalName != null) tw.PluginInternalName = context.InternalName;
+                if (context.IconBytes != null) tw.IconBytes = context.IconBytes;
+
+                InjectMinimizeButton(window, tw, this.windowManagerService);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Attempts an immediate fast-path resolution for a newly observed window against all known
+    /// <see cref="WindowSystem"/> instances, avoiding discovery scan latency.
+    /// </summary>
+    public TrackedWindow? TryFastTrackWindow(string windowName)
+    {
+        if (string.IsNullOrWhiteSpace(windowName)) return null;
+
+        foreach (var (ws, context) in this.knownWindowSystems)
+        {
+            for (var i = 0; i < ws.Windows.Count; i++)
+            {
+                var window = ws.Windows[i];
+                if (string.Equals(window.WindowName, windowName, StringComparison.Ordinal))
+                {
+                    var tw = this.windowManagerService.RegisterWindow(window);
+
+                    if (context.InternalName != null) tw.PluginInternalName = context.InternalName;
+                    if (context.IconBytes != null) tw.IconBytes = context.IconBytes;
+
+                    InjectMinimizeButton(window, tw, this.windowManagerService);
+                    return tw;
+                }
+            }
+        }
+
+        return null;
     }
 
     internal sealed record PluginContext(string? InternalName, byte[]? IconBytes);
