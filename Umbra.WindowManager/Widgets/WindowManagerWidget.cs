@@ -325,7 +325,7 @@ public class WindowManagerWidget : ToolbarWidget
                     Style =
                     {
                         Size = new Size(18, 18),
-                        Anchor = Anchor.MiddleCenter,
+                        Anchor = Anchor.MiddleLeft,
                         TextAlign = Anchor.MiddleCenter,
                         FontSize = 12,
                         ImageScaleMode = ImageScaleMode.Adapt,
