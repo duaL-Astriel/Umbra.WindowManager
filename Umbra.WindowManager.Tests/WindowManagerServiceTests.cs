@@ -378,6 +378,29 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_FiltersOutOverlaysAndNonInteractiveWindows()
+    {
+        var service = new WindowManagerService();
+        var normalWin = new DummyWindow("Normal Window") { IsOpen = true };
+        var noTitleBarWin = new DummyWindow("WaitOverlay") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar };
+        var noDecorationWin = new DummyWindow("OverlayBox") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration };
+        var noInputsWin = new DummyWindow("SpearfishingHelper") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs };
+        var clickthroughWin = new DummyWindow("ClickthroughHUD") { IsOpen = true, IsClickthrough = true };
+
+        service.RegisterWindow(normalWin);
+        service.RegisterWindow(noTitleBarWin);
+        service.RegisterWindow(noDecorationWin);
+        service.RegisterWindow(noInputsWin);
+        service.RegisterWindow(clickthroughWin);
+
+        var visible = new List<TrackedWindow>();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Single(visible);
+        Assert.Equal("Normal Window", visible[0].WindowName);
+    }
+
+    [Fact]
     public void WindowManagerService_PruneDeadWindows_RemovesGarbageCollectedWindowsFromDictionary()
     {
         var service = new WindowManagerService();
