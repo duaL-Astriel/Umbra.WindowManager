@@ -825,6 +825,174 @@ public class WindowManagerWidgetTests
         Assert.Equal("General", blVar.Category);
         Assert.Equal("Window Manager", blVar.Group);
     }
+
+    // --- Grouped dock-group button (V6 split view) ------------------------------------------------
+
+    [Fact]
+    public void UpdateButtons_CollapsesDockGroupWithTwoMembers_IntoSingleSplitButton()
+    {
+        var service = new WindowManagerService();
+        var winA = new DummyWindow("Tab A") { IsOpen = true };
+        var winB = new DummyWindow("Tab B") { IsOpen = true };
+        var twA = service.RegisterWindow(winA);
+        var twB = service.RegisterWindow(winB);
+        service.RegisterDockGroup("dock_g2", "Tab A", new[] { twA, twB });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        // The whole group collapses into one button, keyed by its dock-group key.
+        Assert.Single(widget.Node.ChildNodes);
+        Assert.True(widget.WindowNodes.TryGetValue("dock_g2", out var groupNode));
+        Assert.Contains("dock-group", groupNode!.ClassList);
+        Assert.Contains("window-btn", groupNode.ClassList);
+
+        // Individual members are NOT rendered as their own buttons.
+        Assert.False(widget.WindowNodes.ContainsKey("Tab A"));
+        Assert.False(widget.WindowNodes.ContainsKey("Tab B"));
+
+        // Two member sub-nodes, each with an icon and a visible label (<= 2 members).
+        var members = groupNode.ChildNodes.Where(c => c.ClassList.Contains("wm-member")).ToList();
+        Assert.Equal(2, members.Count);
+        Assert.All(members, m => Assert.Contains(m.ChildNodes, c => c.Id == "icon"));
+        var labels = members
+            .Select(m => m.ChildNodes.FirstOrDefault(c => c.Id == "label")?.NodeValue)
+            .ToList();
+        Assert.Contains("Tab A", labels);
+        Assert.Contains("Tab B", labels);
+
+        // A split divider carrying the symbol sits between the two members.
+        var dividers = groupNode.ChildNodes.Where(c => c.ClassList.Contains("wm-divider")).ToList();
+        var divider = Assert.Single(dividers);
+        Assert.Equal(WindowManagerWidget.DividerSymbol, divider.NodeValue);
+
+        // All direct children must share Anchor.MiddleLeft so Una.Drawing lays them out sequentially;
+        // a MiddleCenter divider would be centered in its own layout group and overlap the members.
+        Assert.All(groupNode.ChildNodes, c => Assert.Equal(Una.Drawing.Anchor.MiddleLeft, c.Style.Anchor));
+    }
+
+    [Fact]
+    public void UpdateButtons_DockGroupWithMoreThanTwoMembers_ShowsIconsOnly()
+    {
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Tab A") { IsOpen = true };
+        var b = new DummyWindow("Tab B") { IsOpen = true };
+        var c = new DummyWindow("Tab C") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        var tc = service.RegisterWindow(c);
+        service.RegisterDockGroup("dock_g3", "Tab A", new[] { ta, tb, tc });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        Assert.Single(widget.Node.ChildNodes);
+        var groupNode = widget.WindowNodes["dock_g3"];
+
+        var members = groupNode.ChildNodes.Where(x => x.ClassList.Contains("wm-member")).ToList();
+        Assert.Equal(3, members.Count);
+
+        // Past two members the titles drop: icons only.
+        Assert.All(members, m => Assert.Contains(m.ChildNodes, c2 => c2.Id == "icon"));
+        Assert.All(members, m => Assert.DoesNotContain(m.ChildNodes, c2 => c2.Id == "label"));
+    }
+
+    [Fact]
+    public void UpdateButtons_GroupButtonLeftClick_TogglesEntireGroup()
+    {
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Tab A") { IsOpen = true, IsFocused = true };
+        var b = new DummyWindow("Tab B") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        service.RegisterDockGroup("dock_gc", "Tab A", new[] { ta, tb });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        var node = widget.WindowNodes["dock_gc"];
+
+        // Group is focused -> click minimizes the whole group.
+        SimulateClick(node);
+        Assert.True(ta.IsMinimized);
+        Assert.True(tb.IsMinimized);
+
+        // Minimized -> click restores the whole group.
+        SimulateClick(node);
+        Assert.False(ta.IsMinimized);
+        Assert.False(tb.IsMinimized);
+    }
+
+    [Fact]
+    public void UpdateButtons_CollapsesVisibleDockGroup_WhenOnlyActiveTabIsInVisibleBuffer()
+    {
+        // Regression: a *visible* dock group only surfaces its active tab in the visible/minimized
+        // buffer -- background docked tabs have HasConfirmedUi=false and are filtered out. Grouping must
+        // still collapse the whole group (driven by the registered DockGroup, not per-frame visibility).
+        var service = new WindowManagerService();
+        var active = new DummyWindow("Tab A") { IsOpen = true };
+        var background = new DummyWindow("Tab B") { IsOpen = true };
+        var ta = service.RegisterWindow(active);
+        var tb = service.RegisterWindow(background);
+        tb.HasConfirmedUi = false; // background docked tab: open, but not drawn this frame
+        service.RegisterDockGroup("dock_vis", "Tab A", new[] { ta, tb });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        Assert.Single(widget.Node.ChildNodes);
+        Assert.True(widget.WindowNodes.TryGetValue("dock_vis", out var groupNode));
+        var members = groupNode!.ChildNodes.Where(c => c.ClassList.Contains("wm-member")).ToList();
+        Assert.Equal(2, members.Count);
+        Assert.False(widget.WindowNodes.ContainsKey("Tab A"));
+        Assert.False(widget.WindowNodes.ContainsKey("Tab B"));
+    }
+
+    [Fact]
+    public void UpdateButtons_GroupDockedTabsDisabled_RendersMembersAsSeparateButtons()
+    {
+        var service = new WindowManagerService();
+        var winA = new DummyWindow("Tab A") { IsOpen = true };
+        var winB = new DummyWindow("Tab B") { IsOpen = true };
+        var twA = service.RegisterWindow(winA);
+        var twB = service.RegisterWindow(winB);
+        service.RegisterDockGroup("dock_off", "Tab A", new[] { twA, twB });
+
+        var widget = CreateWidget(service);
+        widget.GroupDockedTabs = false;
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        // With grouping off, each docked member keeps its own button.
+        Assert.Equal(2, widget.Node.ChildNodes.Count);
+        Assert.True(widget.WindowNodes.ContainsKey("Tab A"));
+        Assert.True(widget.WindowNodes.ContainsKey("Tab B"));
+        Assert.False(widget.WindowNodes.ContainsKey("dock_off"));
+    }
+
+    [Fact]
+    public void UpdateButtons_GroupWithSingleVisibleMember_RendersAsStandaloneButton()
+    {
+        // A dock-group key with only one currently-visible member should not render a split button.
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Solo Tab") { IsOpen = true };
+        var tw = service.RegisterWindow(win);
+        tw.DockGroupKey = "dock_solo"; // key set, but no multi-member group registered
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        Assert.Single(widget.Node.ChildNodes);
+        Assert.True(widget.WindowNodes.ContainsKey("Solo Tab"));
+        Assert.False(widget.WindowNodes.ContainsKey("dock_solo"));
+        // Still visually marked as part of a dock group.
+        Assert.Contains("dock-group", widget.WindowNodes["Solo Tab"].ClassList);
+    }
 }
 
 

@@ -56,6 +56,18 @@ public class WindowManagerWidget : ToolbarWidget
     private readonly HashSet<string> currentNames = [];
     private readonly List<string> toRemove = [];
 
+    // Grouping state. currentRenderKeys is the set of button keys actually rendered this frame -- a
+    // window name for a standalone button, or a dock-group key for a collapsed group button. The two
+    // group sets memoize, per frame, which dock keys collapse into a single button (>1 visible member)
+    // versus falling back to standalone rendering. groupSignatures gates child rebuilds so a stable
+    // group re-renders without reallocating its member/divider nodes (see issue #6).
+    private readonly HashSet<string> currentRenderKeys = [];
+    private readonly HashSet<string> collapsedGroups = [];
+    private readonly HashSet<string> rejectedGroups = [];
+    private readonly HashSet<string> renderedGroups = [];
+    private readonly Dictionary<string, string> groupSignatures = [];
+    private readonly List<TrackedWindow> memberScratch = [];
+
     private Node? dropdownNode;
     private MenuPopup? menuPopup;
     private string layout = "";
@@ -345,7 +357,10 @@ public class WindowManagerWidget : ToolbarWidget
             }
         }
 
-        this.effectiveMode = this.ResolveEffectiveMode(this.windowsBuffer.Count);
+        // Decide which windows collapse into dock-group buttons, then resolve the mode from the number
+        // of buttons we will actually draw (a collapsed group counts as one), not the raw window count.
+        this.BuildRenderKeys();
+        this.effectiveMode = this.ResolveEffectiveMode(this.currentRenderKeys.Count);
 
         if (this.effectiveMode == "Dropdown")
         {
@@ -357,6 +372,66 @@ public class WindowManagerWidget : ToolbarWidget
             this.SwitchToButtonLayout();
             this.RenderButtons(this.effectiveMode);
         }
+    }
+
+    /// <summary>
+    /// Populates <see cref="currentRenderKeys"/> with one key per button that will be drawn this frame:
+    /// a dock-group key for each dock group that collapses (more than one visible member), or a window
+    /// name for every standalone window. A dock group with a single visible member (or no registered
+    /// group) falls back to a standalone button. Also refreshes <see cref="collapsedGroups"/> /
+    /// <see cref="rejectedGroups"/>, which the render pass reuses.
+    /// </summary>
+    private void BuildRenderKeys()
+    {
+        this.currentRenderKeys.Clear();
+        this.collapsedGroups.Clear();
+        this.rejectedGroups.Clear();
+
+        for (var i = 0; i < this.windowsBuffer.Count; i++)
+        {
+            var w = this.windowsBuffer[i];
+            var key = this.GroupDockedTabs ? w.DockGroupKey : null;
+
+            if (key != null)
+            {
+                if (this.collapsedGroups.Contains(key))
+                    continue; // Already represented by its group button.
+
+                if (!this.rejectedGroups.Contains(key))
+                {
+                    var group = this.windowManager.GetDockGroup(key);
+                    if (group != null && GetLiveGroupMemberCount(group) > 1)
+                    {
+                        this.collapsedGroups.Add(key);
+                        this.currentRenderKeys.Add(key);
+                        continue;
+                    }
+
+                    this.rejectedGroups.Add(key);
+                }
+            }
+
+            this.currentRenderKeys.Add(w.WindowName);
+        }
+    }
+
+    /// <summary>
+    /// Counts the group's members whose underlying window is still alive. This is the authoritative set
+    /// for grouping -- it does NOT depend on which members are visible this frame, because a visible dock
+    /// group only renders its active tab (background tabs report <c>HasConfirmedUi == false</c> and are
+    /// filtered out of the visible buffer). Gating on visibility would leave a visible group uncollapsed.
+    /// </summary>
+    private static int GetLiveGroupMemberCount(DockGroup group)
+    {
+        var count = 0;
+        var members = group.Members;
+        for (var i = 0; i < members.Count; i++)
+        {
+            if (members[i].TryGetWindow(out _))
+                count++;
+        }
+
+        return count;
     }
 
     // --- Mode resolution ----------------------------------------------------------------------------
@@ -427,22 +502,35 @@ public class WindowManagerWidget : ToolbarWidget
     private void RenderButtons(string mode)
     {
         this.toRemove.Clear();
-        foreach (var name in this.windowNodes.Keys)
+        foreach (var key in this.windowNodes.Keys)
         {
-            if (!this.currentNames.Contains(name))
-                this.toRemove.Add(name);
+            if (!this.currentRenderKeys.Contains(key))
+                this.toRemove.Add(key);
         }
 
         for (var i = 0; i < this.toRemove.Count; i++)
         {
-            if (this.windowNodes.Remove(this.toRemove[i], out var node))
+            var key = this.toRemove[i];
+            if (this.windowNodes.Remove(key, out var node))
                 this.rootNode.RemoveChild(node, true);
+            this.groupSignatures.Remove(key);
         }
 
         var showLabel = mode == "Taskbar";
+        this.renderedGroups.Clear();
+
         for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
             var window = this.windowsBuffer[i];
+            var key = this.GroupDockedTabs ? window.DockGroupKey : null;
+
+            if (key != null && this.collapsedGroups.Contains(key))
+            {
+                if (this.renderedGroups.Add(key))
+                    this.RenderGroupButton(key, showLabel);
+                continue;
+            }
+
             if (!this.windowNodes.TryGetValue(window.WindowName, out var btnNode))
             {
                 btnNode = this.CreateButtonNode(window.WindowName);
@@ -550,6 +638,306 @@ public class WindowManagerWidget : ToolbarWidget
             labelNode.NodeValue = title;
         labelNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? (float)this.MaxTitleWidth : null;
         labelNode.Style.IsVisible = showLabel;
+    }
+
+    // --- Grouped dock-group button (split view) -----------------------------------------------------
+
+    /// <summary>
+    /// Renders (or refreshes) a single button representing a whole dock group. Members are drawn side by
+    /// side in a browser-style split view: at two members each side shows icon + title; past two the
+    /// titles drop and only icons remain, so the button stays compact.
+    /// </summary>
+    private void RenderGroupButton(string groupKey, bool showLabel)
+    {
+        var group = this.windowManager.GetDockGroup(groupKey);
+        if (group == null) return;
+
+        // Collect every live member in the group's own stable order (the ImGui monitor emits a consistent
+        // order). We deliberately use the registered members, not the visible buffer: a visible dock group
+        // only surfaces its active tab there, so filtering by visibility would drop the background tabs.
+        this.memberScratch.Clear();
+        var groupMembers = group.Members;
+        for (var i = 0; i < groupMembers.Count; i++)
+        {
+            if (groupMembers[i].TryGetWindow(out _))
+                this.memberScratch.Add(groupMembers[i]);
+        }
+
+        if (this.memberScratch.Count == 0) return;
+
+        if (!this.windowNodes.TryGetValue(groupKey, out var node))
+        {
+            node = this.CreateGroupNode(groupKey);
+            this.rootNode.AppendChild(node);
+            this.windowNodes[groupKey] = node;
+        }
+
+        this.UpdateGroupNode(node, groupKey, group, showLabel);
+    }
+
+    private Node CreateGroupNode(string groupKey)
+    {
+        var node = new Node
+        {
+            ClassList = { "window-btn", "dock-group" },
+            Style =
+            {
+                Flow = Flow.Horizontal,
+                Gap = 4,
+                Padding = new EdgeSize(4, 6, 4, 6),
+                BorderRadius = 4,
+                RoundedCorners = RoundedCorners.All,
+                Anchor = Anchor.MiddleCenter
+            }
+        };
+
+        // A left-click toggles the whole group; resolve the live representative at click time (issue #2).
+        // wasFocused is captured on mouse-down because the toolbar steals ImGui focus during the click.
+        var wasFocused = false;
+        node.OnMouseDown += _ =>
+        {
+            wasFocused = this.IsGroupFocused(groupKey) || node.ClassList.Contains("active");
+        };
+        node.OnClick += _ =>
+        {
+            var rep = this.ResolveGroupRepresentative(groupKey);
+            if (rep == null) return;
+
+            var focused = wasFocused || this.IsGroupFocused(groupKey) || node.ClassList.Contains("active");
+            wasFocused = false;
+            this.windowManager.Toggle(rep, focused);
+        };
+        node.OnRightClick += _ =>
+        {
+            var rep = this.ResolveGroupRepresentative(groupKey);
+            if (rep != null)
+                this.PresentContextMenu(rep);
+        };
+
+        return node;
+    }
+
+    private void UpdateGroupNode(Node node, string groupKey, DockGroup group, bool showLabel)
+    {
+        var members = this.memberScratch;
+
+        var anyFocused = false;
+        var allMinimized = true;
+        for (var i = 0; i < members.Count; i++)
+        {
+            if (members[i].IsFocused) anyFocused = true;
+            if (!members[i].IsMinimized) allMinimized = false;
+        }
+
+        node.ToggleClass("active", anyFocused);
+        node.ToggleClass("open", !allMinimized);
+        node.ToggleClass("minimized", allMinimized);
+        node.ToggleClass("dock-group", true);
+        node.ToggleClass("decorated", this.Decorate);
+        node.Style.Opacity = allMinimized ? 0.6f : 1.0f;
+
+        // Titles show only for a pair; a larger group collapses to an icon-only split row.
+        var withLabels = showLabel && members.Count <= 2;
+
+        // Rebuild the member/divider child nodes only when the visible set, active tab, or label mode
+        // changes, so a stable group re-renders without reallocating its subtree (see issue #6).
+        var signature = BuildGroupSignature(members, group.ActiveWindowName, withLabels);
+        if (!this.groupSignatures.TryGetValue(groupKey, out var existing) || existing != signature)
+        {
+            this.RebuildGroupChildren(node, withLabels);
+            this.groupSignatures[groupKey] = signature;
+        }
+
+        this.RefreshGroupMembers(node, group.ActiveWindowName);
+
+        node.Tooltip = BuildGroupTooltip(members, group.ActiveWindowName, allMinimized);
+    }
+
+    private void RebuildGroupChildren(Node node, bool withLabels)
+    {
+        for (var i = node.ChildNodes.Count - 1; i >= 0; i--)
+            node.RemoveChild(node.ChildNodes[i], true);
+
+        var members = this.memberScratch;
+        for (var i = 0; i < members.Count; i++)
+        {
+            if (i > 0)
+                node.AppendChild(CreateDividerNode());
+            node.AppendChild(CreateMemberNode(withLabels));
+        }
+    }
+
+    /// <summary>Applies live icon, title and active-tab emphasis onto the group's member sub-nodes.</summary>
+    private void RefreshGroupMembers(Node node, string activeName)
+    {
+        var members = this.memberScratch;
+        var idx = 0;
+        var children = node.ChildNodes;
+        for (var c = 0; c < children.Count; c++)
+        {
+            var child = children[c];
+            if (!child.ClassList.Contains("wm-member")) continue;
+            if (idx >= members.Count) break;
+
+            var window = members[idx++];
+
+            ApplyIcon(child.ChildNodes[0], window);
+
+            if (child.ChildNodes.Count > 1)
+            {
+                var labelNode = child.ChildNodes[1];
+                var title = window.DisplayTitle;
+                if (!Equals(labelNode.NodeValue, title))
+                    labelNode.NodeValue = title;
+                labelNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? (float)this.MaxTitleWidth : null;
+            }
+
+            // The active tab reads at full strength; the others recede, so the split still shows which
+            // window is in front.
+            child.Style.Opacity = window.WindowName == activeName ? 1.0f : 0.55f;
+        }
+    }
+
+    private static Node CreateMemberNode(bool withLabel)
+    {
+        var node = new Node
+        {
+            ClassList = { "wm-member" },
+            Style =
+            {
+                Flow = Flow.Horizontal,
+                Gap = 6,
+                Anchor = Anchor.MiddleLeft,
+                Padding = new EdgeSize(0, 4, 0, 4)
+            },
+            ChildNodes =
+            {
+                new Node
+                {
+                    Id = "icon",
+                    Style =
+                    {
+                        Size = new Size(18, 18),
+                        Anchor = Anchor.MiddleLeft,
+                        TextAlign = Anchor.MiddleCenter,
+                        FontSize = 12,
+                        ImageScaleMode = ImageScaleMode.Adapt,
+                        ImageRounding = 3
+                    }
+                }
+            }
+        };
+
+        if (withLabel)
+        {
+            node.AppendChild(new Node
+            {
+                Id = "label",
+                Style =
+                {
+                    Anchor = Anchor.MiddleLeft,
+                    TextAlign = Anchor.MiddleLeft,
+                    WordWrap = false,
+                    TextOverflow = false
+                }
+            });
+        }
+
+        return node;
+    }
+
+    /// <summary>
+    /// The split symbol drawn between two members. An ASCII pipe -- guaranteed to be in the game font
+    /// atlas, unlike the Unicode diamond glyph, which the font does not carry.
+    /// </summary>
+    internal const string DividerSymbol = "|";
+
+    private static Node CreateDividerNode()
+    {
+        return new Node
+        {
+            ClassList = { "wm-divider" },
+            NodeValue = DividerSymbol,
+            Style =
+            {
+                FontSize = 14,
+                // MiddleLeft (matching the member nodes) so Una.Drawing lays the divider out sequentially
+                // in the horizontal flow. A MiddleCenter anchor puts it in its own centered layout group,
+                // where it overlaps the members instead of sitting between them.
+                Anchor = Anchor.MiddleLeft,
+                TextAlign = Anchor.MiddleCenter,
+                Opacity = 0.6f,
+                Padding = new EdgeSize(0, 3, 0, 3)
+            }
+        };
+    }
+
+    private bool IsGroupFocused(string groupKey)
+    {
+        var group = this.windowManager.GetDockGroup(groupKey);
+        if (group == null) return false;
+
+        var members = group.Members;
+        for (var i = 0; i < members.Count; i++)
+        {
+            if (members[i].IsFocused)
+                return true;
+        }
+
+        return false;
+    }
+
+    private TrackedWindow? ResolveGroupRepresentative(string groupKey)
+    {
+        var group = this.windowManager.GetDockGroup(groupKey);
+        if (group == null)
+        {
+            foreach (var w in this.currentWindows.Values)
+            {
+                if (w.DockGroupKey == groupKey)
+                    return w;
+            }
+
+            return null;
+        }
+
+        var members = group.Members;
+        TrackedWindow? fallback = null;
+        for (var i = 0; i < members.Count; i++)
+        {
+            var member = members[i];
+            if (!member.TryGetWindow(out _)) continue;
+
+            if (member.WindowName == group.ActiveWindowName)
+                return member;
+
+            fallback ??= member;
+        }
+
+        return fallback;
+    }
+
+    private static string BuildGroupSignature(List<TrackedWindow> members, string activeName, bool withLabels)
+    {
+        var names = string.Join(";", members.Select(m => m.WindowName));
+        return $"{(withLabels ? 'L' : 'I')}|{activeName}|{names}";
+    }
+
+    private static string BuildGroupTooltip(List<TrackedWindow> members, string activeName, bool minimized)
+    {
+        var activeTitle = members.Count > 0 ? members[0].DisplayTitle : string.Empty;
+        for (var i = 0; i < members.Count; i++)
+        {
+            if (members[i].WindowName == activeName)
+            {
+                activeTitle = members[i].DisplayTitle;
+                break;
+            }
+        }
+
+        var extra = members.Count - 1;
+        var text = extra > 0 ? $"{activeTitle} (+{extra})" : activeTitle;
+        return minimized ? $"{text} [Minimized]" : text;
     }
 
     private static void ApplyIcon(Node iconNode, TrackedWindow window)
