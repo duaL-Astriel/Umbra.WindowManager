@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Dalamud.Interface;
 using Umbra.Common;
 using Umbra.Widgets;
 using Umbra.WindowManager.Services.WindowManager;
@@ -32,6 +33,7 @@ public class WindowManagerWidget : ToolbarWidget
     private string displayMode = "Auto";
     private int maxTitleWidth = 140;
     private bool groupDockedTabs = true;
+    private bool decorate = true;
 
     public WindowManagerWidget(
         WidgetInfo info,
@@ -51,6 +53,7 @@ public class WindowManagerWidget : ToolbarWidget
         this.windowManager = windowManager ?? Framework.Service<WindowManagerService>();
         this.rootNode = new Node
         {
+            ClassList = { "widget" },
             Style =
             {
                 Flow = Flow.Horizontal,
@@ -112,6 +115,20 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
+    [ConfigVariable("WindowManager.Decorate", "General", "Window Manager")]
+    public bool Decorate
+    {
+        get => this.HasConfigVariable("WindowManager.Decorate")
+            ? this.GetConfigValue<bool>("WindowManager.Decorate")
+            : this.decorate;
+        set
+        {
+            this.decorate = value;
+            if (this.HasConfigVariable("WindowManager.Decorate"))
+                this.SetConfigValue("WindowManager.Decorate", value);
+        }
+    }
+
     protected override void Initialize()
     {
     }
@@ -152,12 +169,19 @@ public class WindowManagerWidget : ToolbarWidget
                 "Group Docked Tabs",
                 "Group docked tabs together in toolbar.",
                 true
+            ),
+            new BooleanWidgetConfigVariable(
+                "WindowManager.Decorate",
+                "Decorate",
+                "Toggle widget container styling/decoration.",
+                true
             )
         ];
     }
 
     public void UpdateButtons()
     {
+        this.rootNode.ToggleClass("decorated", this.Decorate);
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
 
         // Refresh the name -> current TrackedWindow map so click handlers always act on the live window
@@ -391,7 +415,7 @@ public class WindowManagerWidget : ToolbarWidget
         this.layout = "dropdown";
     }
 
-    private static Node CreateDropdownNode()
+    internal static Node CreateDropdownNode()
     {
         return new Node
         {
@@ -406,8 +430,40 @@ public class WindowManagerWidget : ToolbarWidget
             },
             ChildNodes =
             {
-                new Node { Id = "icon", NodeValue = "▾" }, // caret; the popup opens via Popup.
-                new Node { Id = "badge", NodeValue = "0" }
+                new Node
+                {
+                    Id = "icon",
+                    NodeValue = FontAwesomeIcon.WindowRestore.ToIconString(),
+                    Style =
+                    {
+                        Font = 2,
+                        FontSize = 13,
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter
+                    }
+                },
+                new Node
+                {
+                    Id = "badge",
+                    NodeValue = "0",
+                    Style =
+                    {
+                        FontSize = 12,
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter
+                    }
+                },
+                new Node
+                {
+                    Id = "caret",
+                    NodeValue = "▾",
+                    Style =
+                    {
+                        FontSize = 10,
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter
+                    }
+                }
             }
         };
     }
@@ -457,7 +513,13 @@ public class WindowManagerWidget : ToolbarWidget
         }
 
         if (this.dropdownNode is { } dn)
-            dn.ChildNodes[1].NodeValue = this.windowsBuffer.Count.ToString();
+        {
+            var countStr = this.windowsBuffer.Count.ToString();
+            var badgeNode = dn.ChildNodes.FirstOrDefault(c => c.Id == "badge") ?? dn.ChildNodes[1];
+            if (!Equals(badgeNode.NodeValue, countStr))
+                badgeNode.NodeValue = countStr;
+            dn.Tooltip = this.windowsBuffer.Count == 1 ? "1 open window" : $"{this.windowsBuffer.Count} open windows";
+        }
     }
 
     private MenuPopup EnsureMenuPopup() => this.menuPopup ??= new MenuPopup();

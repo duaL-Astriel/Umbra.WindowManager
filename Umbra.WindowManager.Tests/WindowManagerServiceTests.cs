@@ -378,6 +378,73 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_FiltersOutOverlaysAndNonInteractiveWindows()
+    {
+        var service = new WindowManagerService();
+        var normalWin = new DummyWindow("Normal Window") { IsOpen = true };
+        var noTitleBarWin = new DummyWindow("WaitOverlay") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar };
+        var noDecorationWin = new DummyWindow("OverlayBox") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration };
+        var noInputsWin = new DummyWindow("SpearfishingHelper") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs };
+        var clickthroughWin = new DummyWindow("ClickthroughHUD") { IsOpen = true, IsClickthrough = true };
+
+        service.RegisterWindow(normalWin);
+        service.RegisterWindow(noTitleBarWin);
+        service.RegisterWindow(noDecorationWin);
+        service.RegisterWindow(noInputsWin);
+        service.RegisterWindow(clickthroughWin);
+
+        var visible = new List<TrackedWindow>();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Single(visible);
+        Assert.Equal("Normal Window", visible[0].WindowName);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_RetainsWindowsWithNoCollapseNoResizeOrNoScrollbar()
+    {
+        var service = new WindowManagerService();
+        var noCollapseWin = new DummyWindow("NoCollapse Window")
+        {
+            IsOpen = true,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse
+        };
+        var noResizeWin = new DummyWindow("NoResize Window")
+        {
+            IsOpen = true,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoResize
+        };
+        var noScrollbarWin = new DummyWindow("NoScrollbar Window")
+        {
+            IsOpen = true,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoScrollbar
+        };
+
+        var twCollapse = service.RegisterWindow(noCollapseWin);
+        var twResize = service.RegisterWindow(noResizeWin);
+        var twScrollbar = service.RegisterWindow(noScrollbarWin);
+
+        var visible = new List<TrackedWindow>();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Equal(3, visible.Count);
+        Assert.Contains(twCollapse, visible);
+        Assert.Contains(twResize, visible);
+        Assert.Contains(twScrollbar, visible);
+
+        // When a window with NoCollapse is minimized, it must remain visible in GetVisibleAndMinimizedWindows
+        service.Minimize(twCollapse);
+        Assert.True(twCollapse.IsMinimized);
+        Assert.False(twCollapse.IsOpen);
+
+        visible.Clear();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Equal(3, visible.Count);
+        Assert.Contains(twCollapse, visible);
+    }
+
+    [Fact]
     public void WindowManagerService_PruneDeadWindows_RemovesGarbageCollectedWindowsFromDictionary()
     {
         var service = new WindowManagerService();
