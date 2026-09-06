@@ -202,6 +202,110 @@ public class WindowManagerWidgetTests
     }
 
     [Fact]
+    public void UpdateButtons_ClickMinimizesWhenWindowWasFocusedBeforeClick()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("ToggleWin") { IsFocused = true };
+        var tw = service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["ToggleWin"];
+
+        // Simulate toolbar stealing ImGui focus on click
+        win.IsFocused = false;
+
+        SimulateClick(btnNode);
+
+        Assert.True(tw.IsMinimized);
+        Assert.False(win.IsOpen);
+    }
+
+    private static void SimulateClick(Node node)
+    {
+        var mouseDownEvent = typeof(Node).GetField("OnMouseDown", BindingFlags.Instance | BindingFlags.NonPublic);
+        var mouseDownDelegate = mouseDownEvent?.GetValue(node) as Action<Node>;
+        mouseDownDelegate?.Invoke(node);
+
+        var clickEvent = typeof(Node).GetField("OnClick", BindingFlags.Instance | BindingFlags.NonPublic);
+        var clickDelegate = clickEvent?.GetValue(node) as Action<Node>;
+        clickDelegate?.Invoke(node);
+    }
+
+    [Fact]
+    public void UpdateButtons_ClickBringsToFrontWhenWindowWasNotFocused()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("UnfocusedWin") { IsFocused = false, RequestFocus = false };
+        var tw = service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["UnfocusedWin"];
+        SimulateClick(btnNode);
+
+        Assert.False(tw.IsMinimized);
+        Assert.True(win.IsOpen);
+        Assert.True(win.RequestFocus);
+    }
+
+    [Fact]
+    public void UpdateButtons_SubsequentClickMinimizesAfterBeingFocused()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("SubsequentWin") { IsFocused = false, RequestFocus = false };
+        var tw = service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["SubsequentWin"];
+
+        // 1st click: unfocused -> brings to front
+        SimulateClick(btnNode);
+        Assert.False(tw.IsMinimized);
+        Assert.True(win.RequestFocus);
+
+        // Window gains focus, next frame renders
+        win.IsFocused = true;
+        win.RequestFocus = false;
+        widget.UpdateButtons();
+
+        // 2nd click: toolbar steals focus before/during click
+        win.IsFocused = false;
+        SimulateClick(btnNode);
+
+        Assert.True(tw.IsMinimized);
+        Assert.False(win.IsOpen);
+    }
+
+    [Fact]
+    public void UpdateButtons_ClickingAnotherWindowDoesNotMinimizeFirstWindow()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Win1") { IsFocused = true };
+        var win2 = new DummyWindow("Win2") { IsFocused = false, RequestFocus = false };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode2 = widget.WindowNodes["Win2"];
+
+        // Clicking Win2's button while Win1 was focused should bring Win2 to front, not minimize Win1 or Win2
+        SimulateClick(btnNode2);
+
+        Assert.False(tw1.IsMinimized);
+        Assert.True(win1.IsOpen);
+        Assert.False(tw2.IsMinimized);
+        Assert.True(win2.IsOpen);
+        Assert.True(win2.RequestFocus);
+    }
+
+    [Fact]
     public void UpdateButtons_ClickActsOnReinstantiatedWindow()
     {
         // Regression for issue #2: after a plugin re-instantiates a same-named window, the button's
