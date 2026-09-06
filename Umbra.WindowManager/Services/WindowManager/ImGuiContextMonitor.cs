@@ -33,6 +33,17 @@ public class ImGuiContextMonitor
     public static bool ValidateWindowContent(System.Numerics.Vector2 contentSize, int drawCmdCount) =>
         contentSize.X > 0 || contentSize.Y > 0 || drawCmdCount > 2;
 
+    /// <summary>
+    /// Whether a window should be tracked as a member of a multi-window dock group this frame.
+    /// Membership is derived from the window's bound dock node and its member count, NOT from the
+    /// per-frame <c>DockIsActive</c> flag: inactive/background tabs report <c>DockIsActive == false</c>,
+    /// which previously stripped their <see cref="TrackedWindow.DockGroupKey"/> every frame, collapsed
+    /// the group to a single member, and made the minimize action fall back to standalone minimization
+    /// instead of minimizing the whole group (issue #25).
+    /// </summary>
+    public static bool IsDockGroupMember(bool hasDockNode, int dockNodeWindowCount) =>
+        hasDockNode && dockNodeWindowCount > 1;
+
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
     {
@@ -118,10 +129,20 @@ public class ImGuiContextMonitor
                 tracked.HasConfirmedUi = false;
             }
 
-            // Continuous injection check: verify titlebar button is retained (e.g. if plugin cleared buttons)
+            // Whether this window is a background/active tab in a multi-window dock node. Derived from the
+            // bound dock node (not the per-frame DockIsActive flag) so inactive tabs are handled too (#25).
+            var dockNode = win.DockNode;
+            var isDockGroupMember = IsDockGroupMember(!dockNode.IsNull, dockNode.IsNull ? 0 : dockNode.Windows.Size);
+
+            // Continuous injection check: keep the minimize button in sync with dock state. Docked tabs get
+            // it removed (Dalamud draws it inside the client area where it collides with plugin controls,
+            // issue #25); floating/standalone windows keep it re-injected in case a plugin cleared buttons.
             if (tracked.TryGetWindow(out var dalamudWindow))
             {
-                DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
+                if (isDockGroupMember)
+                    DalamudWindowTracker.RemoveMinimizeButton(dalamudWindow);
+                else
+                    DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
             }
 
             // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
@@ -147,8 +168,10 @@ public class ImGuiContextMonitor
                 }
             }
 
-            // 2. Dock node tracking
-            if (win.DockIsActive && !win.DockNode.IsNull)
+            // 2. Dock node tracking. Every window bound to the multi-window node is collected as it is
+            // iterated (each shares the same DockId), so background tabs -- whose DockIsActive is false --
+            // are no longer dropped from the group (issue #25).
+            if (isDockGroupMember)
             {
                 var dockId = win.DockId;
                 if (!this.dockGroups.TryGetValue(dockId, out var groupMembers))

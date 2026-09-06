@@ -518,6 +518,60 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
+    public void RemoveMinimizeButton_RemovesPreviouslyInjectedButton()
+    {
+        // Docked tabs must drop the injected button: Dalamud draws it inside the client area where it
+        // collides with and hides beneath plugin controls (issue #25).
+        var service = new WindowManagerService();
+        var win = new DummyWindow("DockedTab");
+        var tw = service.RegisterWindow(win);
+
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+        Assert.Single(win.TitleBarButtons);
+
+        DalamudWindowTracker.RemoveMinimizeButton(win);
+        Assert.Empty(win.TitleBarButtons);
+    }
+
+    [Fact]
+    public void RemoveMinimizeButton_AllowsReinjectionAfterUndock()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("RedockableTab");
+        var tw = service.RegisterWindow(win);
+
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+        DalamudWindowTracker.RemoveMinimizeButton(win);
+        Assert.Empty(win.TitleBarButtons);
+
+        // Once the window undocks, its minimize control must come back.
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+        Assert.Single(win.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, win.TitleBarButtons.First().Icon);
+    }
+
+    [Fact]
+    public void RemoveMinimizeButton_WhenNoButtonInjected_IsNoOp()
+    {
+        var win = new DummyWindow("NoButtonWindow");
+        Assert.Empty(win.TitleBarButtons);
+
+        var ex = Record.Exception(() => DalamudWindowTracker.RemoveMinimizeButton(win));
+        Assert.Null(ex);
+        Assert.Empty(win.TitleBarButtons);
+    }
+
+    [Fact]
+    public void RemoveMinimizeButton_NullTitleBarButtons_DoesNotThrow()
+    {
+        var win = new DummyWindow("NullButtonsRemove");
+        win.TitleBarButtons = null!;
+
+        var ex = Record.Exception(() => DalamudWindowTracker.RemoveMinimizeButton(win));
+        Assert.Null(ex);
+    }
+
+    [Fact]
     public void TryFastTrackWindow_RegistersAndInjectsNewlyAddedWindowFromKnownWindowSystem()
     {
         var service = new WindowManagerService();

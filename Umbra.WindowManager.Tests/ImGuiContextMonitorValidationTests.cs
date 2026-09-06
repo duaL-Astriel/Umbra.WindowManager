@@ -43,4 +43,20 @@ public class ImGuiContextMonitorValidationTests
         var monitor = new ImGuiContextMonitor(service, tracker);
         Assert.NotNull(monitor);
     }
+
+    [Theory]
+    // A window bound to a dock node with more than one member is a dock-group member. This holds even
+    // for inactive/background tabs, whose per-frame DockIsActive flag is false -- the previous gate
+    // stripped their dock group association and broke group minimize (issue #25).
+    [InlineData(true, 2, true)]
+    [InlineData(true, 5, true)]
+    // A window alone in its dock node is not a group (no shared tab bar / titlebar collision).
+    [InlineData(true, 1, false)]
+    // A floating window (no bound dock node) is never a group, even if a stale member count is reported.
+    [InlineData(false, 0, false)]
+    [InlineData(false, 3, false)]
+    public void IsDockGroupMember_EvaluatesFromDockNodeMembership(bool hasDockNode, int dockNodeWindowCount, bool expected)
+    {
+        Assert.Equal(expected, ImGuiContextMonitor.IsDockGroupMember(hasDockNode, dockNodeWindowCount));
+    }
 }

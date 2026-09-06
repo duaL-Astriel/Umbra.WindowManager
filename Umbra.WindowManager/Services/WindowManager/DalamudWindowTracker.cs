@@ -135,6 +135,26 @@ public class DalamudWindowTracker
         InjectedButtons.AddOrUpdate(window, button);
     }
 
+    /// <summary>
+    /// Removes the minimize button we injected into <paramref name="window"/>, if present. Docked windows
+    /// in a multi-tab dock node have no real title bar, so Dalamud renders the injected button inside the
+    /// client content area where it collides with (and is drawn beneath) the plugin's own controls,
+    /// making it visually obscured and unclickable (issue #25). For those windows we drop the raw button
+    /// and rely on the toolbar / context-menu minimize actions instead. The window becomes eligible for
+    /// re-injection via <see cref="InjectMinimizeButton"/> once it undocks.
+    /// </summary>
+    public static void RemoveMinimizeButton(IWindow window)
+    {
+        if (window.TitleBarButtons == null)
+            return;
+
+        if (InjectedButtons.TryGetValue(window, out var injected))
+        {
+            window.TitleBarButtons.Remove(injected);
+            InjectedButtons.Remove(window);
+        }
+    }
+
     private int isScanning;
 
     [OnTick(interval: 2000)]
