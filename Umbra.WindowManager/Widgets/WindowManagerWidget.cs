@@ -65,6 +65,7 @@ public class WindowManagerWidget : ToolbarWidget
     private int maxTitleWidth = 140;
     private bool groupDockedTabs = true;
     private bool decorate = true;
+    private string blacklist = "";
 
     public WindowManagerWidget(
         WidgetInfo info,
@@ -95,6 +96,10 @@ public class WindowManagerWidget : ToolbarWidget
                 this.decorate = decb;
             else if (configValues.TryGetValue("WindowManager.Decorate", out var wmDec) && wmDec is bool wmDecb)
                 this.decorate = wmDecb;
+            if (configValues.TryGetValue("WindowManager.Blacklist", out var bl) && bl is string bls)
+                this.blacklist = bls;
+            else if (configValues.TryGetValue("Blacklist", out var bld) && bld is string blds)
+                this.blacklist = blds;
         }
 
         this.rootNode = new Node
@@ -183,6 +188,20 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
+    [ConfigVariable("WindowManager.Blacklist", "General", "Window Manager")]
+    public string Blacklist
+    {
+        get => this.HasConfigVariable("WindowManager.Blacklist")
+            ? this.GetConfigValue<string>("WindowManager.Blacklist")
+            : this.blacklist;
+        set
+        {
+            this.blacklist = value;
+            if (this.HasConfigVariable("WindowManager.Blacklist"))
+                this.SetConfigValue("WindowManager.Blacklist", value);
+        }
+    }
+
     protected override void Initialize()
     {
     }
@@ -241,14 +260,72 @@ public class WindowManagerWidget : ToolbarWidget
             {
                 Category = "General",
                 Group = "Window Manager"
+            },
+            new StringWidgetConfigVariable(
+                "WindowManager.Blacklist",
+                "Blacklist",
+                "Comma-separated list of window titles, window IDs, or plugin internal names to hide from the toolbar.",
+                "",
+                500
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
             }
         ];
+    }
+
+    internal HashSet<string> GetParsedBlacklist()
+    {
+        if (string.IsNullOrWhiteSpace(this.Blacklist))
+            return [];
+
+        return this.Blacklist
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    internal static bool IsBlacklisted(TrackedWindow window, HashSet<string> blacklist)
+    {
+        if (blacklist.Count == 0) return false;
+
+        if (!string.IsNullOrWhiteSpace(window.WindowName) && blacklist.Contains(window.WindowName))
+            return true;
+        if (!string.IsNullOrWhiteSpace(window.CleanTitle) && blacklist.Contains(window.CleanTitle))
+            return true;
+        if (!string.IsNullOrWhiteSpace(window.Id) && blacklist.Contains(window.Id))
+            return true;
+        if (!string.IsNullOrWhiteSpace(window.PluginInternalName) && blacklist.Contains(window.PluginInternalName))
+            return true;
+
+        return false;
+    }
+
+    public void AddToBlacklist(TrackedWindow window)
+    {
+        var identifier = !string.IsNullOrWhiteSpace(window.CleanTitle)
+            ? window.CleanTitle
+            : window.WindowName;
+
+        var current = this.GetParsedBlacklist();
+        if (current.Add(identifier))
+        {
+            this.Blacklist = string.Join(", ", current);
+            this.UpdateButtons();
+        }
     }
 
     public void UpdateButtons()
     {
         this.rootNode.ToggleClass("decorated", this.Decorate);
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
+
+        var blacklistSet = this.GetParsedBlacklist();
+        if (blacklistSet.Count > 0)
+        {
+            this.windowsBuffer.RemoveAll(w => IsBlacklisted(w, blacklistSet));
+        }
+
 
         // Refresh the name -> current TrackedWindow map so click handlers always act on the live window
         // instance, even after a plugin re-instantiates a same-named window (issue #2).
@@ -647,6 +724,7 @@ public class WindowManagerWidget : ToolbarWidget
         {
             actions.Add(new MenuAction("select_active", "Select Active Tab", () => this.windowManager.Restore(window)));
             actions.Add(new MenuAction("close_all", "Close All Tabs", () => this.windowManager.CloseDockGroup(groupKey)));
+            actions.Add(new MenuAction("hide", "Hide from Toolbar", () => this.AddToBlacklist(window)));
             return actions;
         }
 
@@ -656,7 +734,9 @@ public class WindowManagerWidget : ToolbarWidget
             actions.Add(new MenuAction("minimize", "Minimize", () => this.windowManager.Minimize(window)));
 
         actions.Add(new MenuAction("close", "Close", () => this.windowManager.Close(window)));
+        actions.Add(new MenuAction("hide", "Hide from Toolbar", () => this.AddToBlacklist(window)));
         return actions;
+
     }
 
     private void PresentContextMenu(TrackedWindow window)
