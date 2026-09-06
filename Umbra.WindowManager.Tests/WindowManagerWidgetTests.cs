@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using Umbra.Widgets;
 using Umbra.WindowManager.Services.WindowManager;
@@ -113,6 +114,20 @@ public class WindowManagerWidgetTests
 
         // Close window (not open and not minimized)
         service.Close(tw);
+        widget.UpdateButtons();
+
+        Assert.Empty(widget.Node.ChildNodes);
+        Assert.Empty(widget.WindowNodes);
+    }
+
+    [Fact]
+    public void UpdateButtons_IgnoresOverlayWindowsWithoutTitleBar()
+    {
+        var service = new WindowManagerService();
+        var overlay = new DummyWindow("OverlayHelper") { Flags = ImGuiWindowFlags.NoTitleBar };
+        service.RegisterWindow(overlay);
+
+        var widget = CreateWidget(service);
         widget.UpdateButtons();
 
         Assert.Empty(widget.Node.ChildNodes);

@@ -41,11 +41,40 @@ public class DalamudWindowTracker
         if (window.TitleBarButtons == null)
             return;
 
+        if (window.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
+            window.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration))
+            return;
+
         // Idempotent per window *instance* rather than per icon: a plugin may ship its own
         // WindowMinimize button, and we must still inject (and stay bound to) our own. Matching on
         // icon alone would skip injection and leave our minimize action unwired (issue #8.1).
         if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
             return;
+
+        // Clean up any duplicate minimize buttons accumulated across assembly hot-reloads
+        TitleBarButton? existingInList = null;
+        for (var i = window.TitleBarButtons.Count - 1; i >= 0; i--)
+        {
+            var b = window.TitleBarButtons[i];
+            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority == int.MaxValue - 1)
+            {
+                if (existingInList == null)
+                {
+                    existingInList = b;
+                }
+                else
+                {
+                    window.TitleBarButtons.RemoveAt(i);
+                }
+            }
+        }
+
+        if (existingInList != null)
+        {
+            existingInList.Click = _ => service.Minimize(tracked);
+            InjectedButtons.AddOrUpdate(window, existingInList);
+            return;
+        }
 
         var button = new TitleBarButton
         {
