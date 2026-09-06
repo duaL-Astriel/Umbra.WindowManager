@@ -1,10 +1,13 @@
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Umbra.Common;
@@ -21,7 +24,9 @@ public class DalamudWindowTracker
     private static readonly ConditionalWeakTable<IWindow, TitleBarButton> InjectedButtons = new();
 
     // Caches resolved plugin icon bytes by plugin internal name (null = looked up, none found).
-    private readonly Dictionary<string, byte[]?> iconCache = new();
+    private readonly ConcurrentDictionary<string, byte[]?> iconCache = new();
+    private readonly ConcurrentDictionary<string, byte> pendingDownloads = new();
+    private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
     // Plugin context for the discovery pass currently in progress; read by TrackWindowSystem.
     private PluginContext? currentPluginContext;
@@ -40,6 +45,28 @@ public class DalamudWindowTracker
     {
         if (window.TitleBarButtons == null)
             return;
+
+        // Overlays and non-interactive windows should not have minimize buttons injected
+        if (!tracked.IsManageable)
+            return;
+
+        // Suppress native ImGui collapse triangle in favor of toolbar minimization
+        window.Flags |= Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse;
+
+        // Hook any plugin-provided minimize buttons so clicking them also delegates to WindowManagerService.Minimize
+        for (var i = 0; i < window.TitleBarButtons.Count; i++)
+        {
+            var b = window.TitleBarButtons[i];
+            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
+            {
+                var origClick = b.Click;
+                b.Click = mb =>
+                {
+                    origClick?.Invoke(mb);
+                    service.Minimize(tracked);
+                };
+            }
+        }
 
         // Idempotent per window *instance* rather than per icon: a plugin may ship its own
         // WindowMinimize button, and we must still inject (and stay bound to) our own. Matching on
@@ -135,11 +162,16 @@ public class DalamudWindowTracker
             foreach (var localPlugin in installedPlugins)
             {
                 if (localPlugin == null) continue;
+
+                var manifest = localPlugin.GetType().GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
+                var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
+                if (isHide) continue;
+
                 var pluginInstanceField = localPlugin.GetType().GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
                 var pluginObj = pluginInstanceField?.GetValue(localPlugin);
                 if (pluginObj == null) continue;
 
-                this.currentPluginContext = this.ResolvePluginContext(localPlugin);
+                this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest);
                 try
                 {
                     this.ScanObjectForWindowSystems(pluginObj);
@@ -164,20 +196,21 @@ public class DalamudWindowTracker
     /// Resolves the owning plugin's internal name and icon bytes from a Dalamud <c>LocalPlugin</c>
     /// object via reflection. Best-effort: returns whatever could be resolved, or an empty context.
     /// </summary>
-    private PluginContext ResolvePluginContext(object localPlugin)
+    internal PluginContext ResolvePluginContext(object localPlugin, object? manifest = null)
     {
         try
         {
             var lpType = localPlugin.GetType();
-            var manifest = lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
+            manifest ??= lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
             var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string;
+            var iconUrl = manifest?.GetType().GetProperty("IconUrl")?.GetValue(manifest) as string;
 
             byte[]? icon = null;
             if (!string.IsNullOrEmpty(internalName))
             {
                 if (!this.iconCache.TryGetValue(internalName, out icon))
                 {
-                    icon = this.LoadPluginIcon(localPlugin);
+                    icon = this.LoadPluginIcon(localPlugin, internalName, iconUrl);
                     this.iconCache[internalName] = icon;
                 }
             }
@@ -190,19 +223,36 @@ public class DalamudWindowTracker
         }
     }
 
-    private byte[]? LoadPluginIcon(object localPlugin)
+    internal byte[]? LoadPluginIcon(object localPlugin, string? internalName, string? iconUrl)
     {
         try
         {
             var dllFile = localPlugin.GetType().GetProperty("DllFile", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin) as FileInfo;
             var dir = dllFile?.DirectoryName;
-            if (string.IsNullOrEmpty(dir)) return null;
-
-            // Dalamud plugin icon convention.
-            foreach (var candidate in new[] { Path.Combine(dir, "images", "icon.png"), Path.Combine(dir, "icon.png") })
+            if (!string.IsNullOrEmpty(dir))
             {
-                if (File.Exists(candidate))
-                    return File.ReadAllBytes(candidate);
+                // Dalamud plugin icon convention on disk
+                foreach (var candidate in new[] { Path.Combine(dir, "images", "icon.png"), Path.Combine(dir, "icon.png"), Path.Combine(dir, "Images", "Icon.png") })
+                {
+                    if (File.Exists(candidate))
+                        return File.ReadAllBytes(candidate);
+                }
+            }
+
+            // Check persistent icon cache on disk
+            if (!string.IsNullOrEmpty(internalName))
+            {
+                var cachedPath = GetCachedIconPath(internalName);
+                if (File.Exists(cachedPath))
+                {
+                    return File.ReadAllBytes(cachedPath);
+                }
+
+                // If not cached, trigger background download if IconUrl is available
+                if (!string.IsNullOrWhiteSpace(iconUrl) && Uri.TryCreate(iconUrl, UriKind.Absolute, out _))
+                {
+                    this.TriggerIconDownload(internalName, iconUrl, cachedPath);
+                }
             }
         }
         catch
@@ -211,6 +261,58 @@ public class DalamudWindowTracker
         }
 
         return null;
+    }
+
+    internal static string GetCachedIconPath(string internalName)
+    {
+        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        return Path.Combine(appData, "XIVLauncher", "pluginConfigs", "Umbra", "WindowManager", "icons", $"{internalName}.png");
+    }
+
+    private void TriggerIconDownload(string internalName, string url, string cachedPath)
+    {
+        if (!this.pendingDownloads.TryAdd(internalName, 0))
+            return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var bytes = await HttpClient.GetByteArrayAsync(url).ConfigureAwait(false);
+                if (bytes is { Length: > 0 })
+                {
+                    try
+                    {
+                        var dir = Path.GetDirectoryName(cachedPath);
+                        if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                            Directory.CreateDirectory(dir);
+                        await File.WriteAllBytesAsync(cachedPath, bytes).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Disk cache write failure should not prevent runtime icon usage
+                    }
+
+                    this.iconCache[internalName] = bytes;
+
+                    var trackedWindows = this.windowManagerService.GetTrackedWindows();
+                    for (var i = 0; i < trackedWindows.Count; i++)
+                    {
+                        var tw = trackedWindows[i];
+                        if (tw.PluginInternalName == internalName)
+                            tw.IconBytes = bytes;
+                    }
+                }
+            }
+            catch
+            {
+                // Network download failure; fallback to monogram
+            }
+            finally
+            {
+                this.pendingDownloads.TryRemove(internalName, out _);
+            }
+        });
     }
 
     private void ScanObjectForWindowSystems(object obj)
@@ -273,5 +375,5 @@ public class DalamudWindowTracker
         }
     }
 
-    private sealed record PluginContext(string? InternalName, byte[]? IconBytes);
+    internal sealed record PluginContext(string? InternalName, byte[]? IconBytes);
 }
