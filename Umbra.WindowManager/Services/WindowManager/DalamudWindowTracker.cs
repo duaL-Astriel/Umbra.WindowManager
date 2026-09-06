@@ -68,6 +68,18 @@ public class DalamudWindowTracker
 
     public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
     {
+        // Dock-group members (docked together as tabs, e.g. Glamourer + Penumbra) have no usable
+        // per-window title bar: Dalamud draws the button inside the client content area where it collides
+        // with and renders beneath the plugin's own controls (issue #25). Suppress it here -- in the single
+        // shared injection routine -- so the background discovery ticks and fast-track paths agree with the
+        // draw loop instead of re-adding the button it just removed. The window regains its button when it
+        // leaves the group (DockGroupKey cleared). Minimizing is still available from the toolbar widget.
+        if (tracked.DockGroupKey != null)
+        {
+            RemoveMinimizeButton(window);
+            return;
+        }
+
         // Overlays and non-interactive windows should not have minimize buttons injected
         if (!CanInjectMinimizeButton(window))
             return;
