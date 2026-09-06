@@ -64,8 +64,7 @@ public class TrackedWindow
         {
             if (!this.TryGetWindow(out var w)) return false;
             if ((w.Flags & (Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar |
-                           Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration |
-                           Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs)) != 0)
+                           Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs)) != 0)
                 return false;
             if (w.IsClickthrough)
                 return false;
