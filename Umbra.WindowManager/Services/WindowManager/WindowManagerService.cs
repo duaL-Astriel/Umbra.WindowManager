@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Dalamud.Interface.Windowing;
@@ -10,6 +11,7 @@ public class WindowManagerService
 {
     private readonly ConcurrentDictionary<string, TrackedWindow> windows = new();
     private readonly ConcurrentDictionary<string, DockGroup> dockGroups = new();
+    private DateTime lastPruneTime = DateTime.MinValue;
 
     public void GetTrackedWindows(List<TrackedWindow> destination)
     {
@@ -72,7 +74,12 @@ public class WindowManagerService
 
     public TrackedWindow RegisterWindow(IWindow window)
     {
-        this.PruneDeadWindows();
+        var now = DateTime.UtcNow;
+        if (now - this.lastPruneTime > TimeSpan.FromSeconds(5))
+        {
+            this.lastPruneTime = now;
+            this.PruneDeadWindows();
+        }
 
         return this.windows.AddOrUpdate(
             window.WindowName,

@@ -34,4 +34,13 @@ public class ImGuiContextMonitorValidationTests
         var contentSize = new Vector2(cx, cy);
         Assert.Equal(expected, ImGuiContextMonitor.ValidateWindowContent(contentSize, drawCmds));
     }
+
+    [Fact]
+    public void ImGuiContextMonitor_ConstructsWithTracker()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var monitor = new ImGuiContextMonitor(service, tracker);
+        Assert.NotNull(monitor);
+    }
 }
