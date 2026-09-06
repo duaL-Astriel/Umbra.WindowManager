@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
+using Umbra.Common;
 using Umbra.Widgets;
 using Umbra.WindowManager.Services.WindowManager;
 using Umbra.WindowManager.Widgets;
@@ -161,6 +163,13 @@ public class WindowManagerWidgetTests
         Assert.False(node.ChildNodes[1].Style.IsVisible ?? true);
         Assert.Equal("D", node.ChildNodes[0].NodeValue);
         Assert.Equal("DisplayModeWin", node.Tooltip);
+    }
+
+    [Fact]
+    public void MenuPopupButton_SettingInvalidNodeId_ThrowsArgumentException()
+    {
+        var button = new MenuPopup.Button("test");
+        Assert.Throws<ArgumentException>(() => button.Id = "AutoRetainer 4.6.1.34 | Session expires in 2 days 23 hours###AutoRetainer");
     }
 
     [Fact]
@@ -370,7 +379,7 @@ public class WindowManagerWidgetTests
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
-        var decorateVar = vars.OfType<BooleanWidgetConfigVariable>().FirstOrDefault(v => v.Id == "Decorate");
+        var decorateVar = vars.OfType<BooleanWidgetConfigVariable>().FirstOrDefault(v => v.Id == "WindowManager.Decorate");
         Assert.NotNull(decorateVar);
         Assert.Equal("General", decorateVar.Category);
         Assert.Equal("Window Manager", decorateVar.Group);
@@ -380,7 +389,7 @@ public class WindowManagerWidgetTests
     public void Decorate_ReadsFromDecorateConfigVariable_WhenPresent()
     {
         var info = new WidgetInfo("WindowManagerWidget", "Window Manager", "Window manager widget");
-        var configs = new Dictionary<string, object> { { "Decorate", false } };
+        var configs = new Dictionary<string, object> { { "WindowManager.Decorate", false } };
         var widget = new WindowManagerWidget(info, null, configs, new WindowManagerService());
         Assert.False(widget.Decorate);
     }
@@ -452,4 +461,85 @@ public class WindowManagerWidgetTests
         widget.UpdateButtons();
         Assert.DoesNotContain("decorated", widget.Node.ChildNodes[0].ClassList);
     }
+
+    [Fact]
+    public void Decorate_TogglesDecoratedClassOnRootNode()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        // Default Decorate is true, rootNode has widget class
+        Assert.Contains("widget", widget.Node.ClassList);
+
+        widget.UpdateButtons();
+        Assert.Contains("decorated", widget.Node.ClassList);
+
+        widget.Decorate = false;
+        widget.UpdateButtons();
+        Assert.DoesNotContain("decorated", widget.Node.ClassList);
+    }
+
+    [Fact]
+    public void DropdownMode_RendersProperIconBadgeAndCaret()
+    {
+        var ddNode = WindowManagerWidget.CreateDropdownNode();
+
+        // Should have 3 child nodes: icon (WindowRestore), badge (count), caret
+        Assert.Equal(3, ddNode.ChildNodes.Count);
+        var iconNode = ddNode.ChildNodes[0];
+        var badgeNode = ddNode.ChildNodes[1];
+        var caretNode = ddNode.ChildNodes[2];
+
+        Assert.Equal("icon", iconNode.Id);
+        Assert.Equal(Dalamud.Interface.FontAwesomeIcon.WindowRestore.ToIconString(), iconNode.NodeValue);
+
+        Assert.Equal("badge", badgeNode.Id);
+        Assert.Equal("0", badgeNode.NodeValue);
+
+        Assert.Equal("caret", caretNode.Id);
+        Assert.Equal("▾", caretNode.NodeValue);
+    }
+
+    [Fact]
+    public void WindowButton_IconNode_HasExplicitSizeAndScaleMode()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+        var win = new DummyWindow("TestWindow") { IsOpen = true };
+        var tw = service.RegisterWindow(win);
+
+        widget.UpdateButtons();
+
+        // Find the created button
+        Assert.Single(widget.Node.ChildNodes);
+        var btnNode = widget.Node.ChildNodes[0];
+        var iconNode = btnNode.ChildNodes.FirstOrDefault(c => c.Id == "icon");
+
+        Assert.NotNull(iconNode);
+        Assert.NotNull(iconNode!.Style.Size);
+        Assert.Equal(18f, iconNode.Style.Size.Width);
+        Assert.Equal(18f, iconNode.Style.Size.Height);
+        Assert.Equal(Una.Drawing.ImageScaleMode.Adapt, iconNode.Style.ImageScaleMode);
+        Assert.Equal(Una.Drawing.Anchor.MiddleLeft, iconNode.Style.Anchor);
+
+        var labelNode = btnNode.ChildNodes.FirstOrDefault(c => c.Id == "label");
+        Assert.NotNull(labelNode);
+        // Both icon and label must share Anchor.MiddleLeft so Una.Drawing groups them in the same
+        // layout pass and places them sequentially along the horizontal flow instead of overlapping
+        Assert.Equal(Una.Drawing.Anchor.MiddleLeft, labelNode!.Style.Anchor);
+        Assert.Equal(Una.Drawing.Anchor.MiddleLeft, labelNode.Style.TextAlign);
+
+        // When IconBytes is null, monogram text is shown
+        Assert.Equal("T", iconNode.NodeValue);
+        Assert.Null(iconNode.Style.ImageBytes);
+
+        // When IconBytes is provided, ImageBytes is set and NodeValue is cleared
+        var fakePng = new byte[] { 1, 2, 3 };
+        tw.IconBytes = fakePng;
+        widget.UpdateButtons();
+
+        Assert.Null(iconNode.NodeValue);
+        Assert.Same(fakePng, iconNode.Style.ImageBytes);
+    }
 }
+

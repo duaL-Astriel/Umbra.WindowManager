@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Dalamud.Interface;
 using Umbra.Common;
 using Umbra.Widgets;
 using Umbra.WindowManager.Services.WindowManager;
@@ -67,6 +68,7 @@ public class WindowManagerWidget : ToolbarWidget
 
         this.rootNode = new Node
         {
+            ClassList = { "widget" },
             Style =
             {
                 Flow = Flow.Horizontal,
@@ -128,24 +130,24 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
-    [ConfigVariable("Decorate", "General", "Window Manager")]
+    [ConfigVariable("WindowManager.Decorate", "General", "Window Manager")]
     public bool Decorate
     {
         get
         {
-            if (this.HasConfigVariable("Decorate"))
-                return this.GetConfigValue<bool>("Decorate");
             if (this.HasConfigVariable("WindowManager.Decorate"))
                 return this.GetConfigValue<bool>("WindowManager.Decorate");
+            if (this.HasConfigVariable("Decorate"))
+                return this.GetConfigValue<bool>("Decorate");
             return this.decorate;
         }
         set
         {
             this.decorate = value;
-            if (this.HasConfigVariable("Decorate"))
-                this.SetConfigValue("Decorate", value);
             if (this.HasConfigVariable("WindowManager.Decorate"))
                 this.SetConfigValue("WindowManager.Decorate", value);
+            if (this.HasConfigVariable("Decorate"))
+                this.SetConfigValue("Decorate", value);
         }
     }
 
@@ -197,15 +199,11 @@ public class WindowManagerWidget : ToolbarWidget
                 "Group Docked Tabs",
                 "Group docked tabs together in toolbar.",
                 true
-            )
-            {
-                Category = "General",
-                Group = "Window Manager"
-            },
+            ),
             new BooleanWidgetConfigVariable(
+                "WindowManager.Decorate",
                 "Decorate",
-                "Decorate",
-                "Decorate window buttons with Umbra background and border styling.",
+                "Decorate window buttons and container with Umbra background and border styling.",
                 true
             )
             {
@@ -217,6 +215,7 @@ public class WindowManagerWidget : ToolbarWidget
 
     public void UpdateButtons()
     {
+        this.rootNode.ToggleClass("decorated", this.Decorate);
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
 
         // Refresh the name -> current TrackedWindow map so click handlers always act on the live window
@@ -346,10 +345,11 @@ public class WindowManagerWidget : ToolbarWidget
             Style =
             {
                 Flow = Flow.Horizontal,
-                Gap = 4,
+                Gap = 6,
                 Padding = new EdgeSize(4, 6, 4, 6),
                 BorderRadius = 4,
-                RoundedCorners = RoundedCorners.All
+                RoundedCorners = RoundedCorners.All,
+                Anchor = Anchor.MiddleCenter
             },
             ChildNodes =
             {
@@ -358,9 +358,12 @@ public class WindowManagerWidget : ToolbarWidget
                     Id = "icon",
                     Style =
                     {
-                        Size = new Size(16, 16),
-                        FontSize = 11,
-                        TextAlign = Anchor.MiddleCenter
+                        Size = new Size(18, 18),
+                        Anchor = Anchor.MiddleLeft,
+                        TextAlign = Anchor.MiddleCenter,
+                        FontSize = 12,
+                        ImageScaleMode = ImageScaleMode.Adapt,
+                        ImageRounding = 3
                     }
                 },
                 new Node
@@ -368,6 +371,8 @@ public class WindowManagerWidget : ToolbarWidget
                     Id = "label",
                     Style =
                     {
+                        Anchor = Anchor.MiddleLeft,
+                        TextAlign = Anchor.MiddleLeft,
                         WordWrap = false,
                         TextOverflow = false // clip + ellipsize instead of overflowing (issue #8.4)
                     }
@@ -460,7 +465,7 @@ public class WindowManagerWidget : ToolbarWidget
         this.layout = "dropdown";
     }
 
-    private static Node CreateDropdownNode()
+    internal static Node CreateDropdownNode()
     {
         return new Node
         {
@@ -475,8 +480,40 @@ public class WindowManagerWidget : ToolbarWidget
             },
             ChildNodes =
             {
-                new Node { Id = "icon", NodeValue = "▾" }, // caret; the popup opens via Popup.
-                new Node { Id = "badge", NodeValue = "0" }
+                new Node
+                {
+                    Id = "icon",
+                    NodeValue = FontAwesomeIcon.WindowRestore.ToIconString(),
+                    Style =
+                    {
+                        Font = 2,
+                        FontSize = 13,
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter
+                    }
+                },
+                new Node
+                {
+                    Id = "badge",
+                    NodeValue = "0",
+                    Style =
+                    {
+                        FontSize = 12,
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter
+                    }
+                },
+                new Node
+                {
+                    Id = "caret",
+                    NodeValue = "▾",
+                    Style =
+                    {
+                        FontSize = 10,
+                        Anchor = Anchor.MiddleCenter,
+                        TextAlign = Anchor.MiddleCenter
+                    }
+                }
             }
         };
     }
@@ -519,6 +556,18 @@ public class WindowManagerWidget : ToolbarWidget
                     this.dropdownButtons[windowName] = btn;
                 }
 
+                if (window.IconBytes != null)
+                {
+                    var iconNode = btn.Node.QuerySelector(".icon");
+                    if (iconNode != null)
+                    {
+                        if (!ReferenceEquals(iconNode.Style.ImageBytes, window.IconBytes))
+                            iconNode.Style.ImageBytes = window.IconBytes;
+                        if (iconNode.NodeValue != null)
+                            iconNode.NodeValue = null;
+                    }
+                }
+
                 if (!Equals(btn.Label, label))
                     btn.Label = label;
 
@@ -528,7 +577,11 @@ public class WindowManagerWidget : ToolbarWidget
 
         if (this.dropdownNode is { } dn)
         {
-            dn.ChildNodes[1].NodeValue = this.windowsBuffer.Count.ToString();
+            var countStr = this.windowsBuffer.Count.ToString();
+            var badgeNode = dn.ChildNodes.FirstOrDefault(c => c.Id == "badge") ?? dn.ChildNodes[1];
+            if (!Equals(badgeNode.NodeValue, countStr))
+                badgeNode.NodeValue = countStr;
+            dn.Tooltip = this.windowsBuffer.Count == 1 ? "1 open window" : $"{this.windowsBuffer.Count} open windows";
             dn.ToggleClass("decorated", this.Decorate);
         }
     }

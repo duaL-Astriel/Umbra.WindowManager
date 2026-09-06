@@ -162,6 +162,23 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_MinimizedWindowWithOnlyId_IsRetained()
+    {
+        var service = new WindowManagerService();
+        var winOnlyId = new DummyWindow("###orchestrion_miniplayer") { IsOpen = true };
+        var tw = service.RegisterWindow(winOnlyId);
+
+        // Open window with no clean title is ignored (overlay behavior)
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.DoesNotContain(tw, visible);
+
+        // But once minimized, it must be retained so the user can restore it
+        service.Minimize(tw);
+        visible = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(tw, visible);
+    }
+
+    [Fact]
     public void WindowManagerService_DockGroup_MinimizeAndRestore_AffectsAllGroupMembers()
     {
         var service = new WindowManagerService();
@@ -371,6 +388,73 @@ public class WindowManagerServiceTests
         var activeBuffer = new List<TrackedWindow>();
         service.GetActiveAndMinimizedWindows(activeBuffer);
         Assert.Equal(2, activeBuffer.Count);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_FiltersOutOverlaysAndNonInteractiveWindows()
+    {
+        var service = new WindowManagerService();
+        var normalWin = new DummyWindow("Normal Window") { IsOpen = true };
+        var noTitleBarWin = new DummyWindow("WaitOverlay") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar };
+        var noDecorationWin = new DummyWindow("OverlayBox") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration };
+        var noInputsWin = new DummyWindow("SpearfishingHelper") { IsOpen = true, Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs };
+        var clickthroughWin = new DummyWindow("ClickthroughHUD") { IsOpen = true, IsClickthrough = true };
+
+        service.RegisterWindow(normalWin);
+        service.RegisterWindow(noTitleBarWin);
+        service.RegisterWindow(noDecorationWin);
+        service.RegisterWindow(noInputsWin);
+        service.RegisterWindow(clickthroughWin);
+
+        var visible = new List<TrackedWindow>();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Single(visible);
+        Assert.Equal("Normal Window", visible[0].WindowName);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_RetainsWindowsWithNoCollapseNoResizeOrNoScrollbar()
+    {
+        var service = new WindowManagerService();
+        var noCollapseWin = new DummyWindow("NoCollapse Window")
+        {
+            IsOpen = true,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse
+        };
+        var noResizeWin = new DummyWindow("NoResize Window")
+        {
+            IsOpen = true,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoResize
+        };
+        var noScrollbarWin = new DummyWindow("NoScrollbar Window")
+        {
+            IsOpen = true,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoScrollbar
+        };
+
+        var twCollapse = service.RegisterWindow(noCollapseWin);
+        var twResize = service.RegisterWindow(noResizeWin);
+        var twScrollbar = service.RegisterWindow(noScrollbarWin);
+
+        var visible = new List<TrackedWindow>();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Equal(3, visible.Count);
+        Assert.Contains(twCollapse, visible);
+        Assert.Contains(twResize, visible);
+        Assert.Contains(twScrollbar, visible);
+
+        // When a window with NoCollapse is minimized, it must remain visible in GetVisibleAndMinimizedWindows
+        service.Minimize(twCollapse);
+        Assert.True(twCollapse.IsMinimized);
+        Assert.False(twCollapse.IsOpen);
+
+        visible.Clear();
+        service.GetVisibleAndMinimizedWindows(visible);
+
+        Assert.Equal(3, visible.Count);
+        Assert.Contains(twCollapse, visible);
     }
 
     [Fact]
