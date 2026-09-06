@@ -67,7 +67,6 @@ public class DalamudWindowTracker
                 };
             }
         }
-
         // Idempotent per window *instance* rather than per icon: a plugin may ship its own
         // WindowMinimize button, and we must still inject (and stay bound to) our own. Matching on
         // icon alone would skip injection and leave our minimize action unwired (issue #8.1).

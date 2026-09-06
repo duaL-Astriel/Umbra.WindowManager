@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
 using Umbra.WindowManager.Services.WindowManager;
 using Xunit;
@@ -129,11 +130,19 @@ public class WindowManagerServiceTests
         var winMinimized = new DummyWindow("Minimized Window") { IsOpen = true };
         var winClosed = new DummyWindow("Closed Window") { IsOpen = false };
         var winEmptyTitle = new DummyWindow("###Hidden") { IsOpen = true };
+        var winNoTitleBar = new DummyWindow("Overlay NoTitleBar") { IsOpen = true, Flags = ImGuiWindowFlags.NoTitleBar };
+        var winNoDecoration = new DummyWindow("Overlay NoDecoration") { IsOpen = true, Flags = ImGuiWindowFlags.NoDecoration };
+        var winNoInputs = new DummyWindow("Overlay NoInputs") { IsOpen = true, Flags = ImGuiWindowFlags.NoInputs };
+        var winClickthrough = new DummyWindow("Overlay Clickthrough") { IsOpen = true, IsClickthrough = true };
 
         var twOpen = service.RegisterWindow(winOpen);
         var twMinimized = service.RegisterWindow(winMinimized);
         var twClosed = service.RegisterWindow(winClosed);
         var twEmptyTitle = service.RegisterWindow(winEmptyTitle);
+        var twNoTitleBar = service.RegisterWindow(winNoTitleBar);
+        var twNoDecoration = service.RegisterWindow(winNoDecoration);
+        var twNoInputs = service.RegisterWindow(winNoInputs);
+        var twClickthrough = service.RegisterWindow(winClickthrough);
 
         service.Minimize(twMinimized);
 
@@ -144,6 +153,10 @@ public class WindowManagerServiceTests
         Assert.Contains(twMinimized, visibleAndMinimized);
         Assert.DoesNotContain(twClosed, visibleAndMinimized);
         Assert.DoesNotContain(twEmptyTitle, visibleAndMinimized);
+        Assert.DoesNotContain(twNoTitleBar, visibleAndMinimized);
+        Assert.DoesNotContain(twNoDecoration, visibleAndMinimized);
+        Assert.DoesNotContain(twNoInputs, visibleAndMinimized);
+        Assert.DoesNotContain(twClickthrough, visibleAndMinimized);
 
         Assert.Equal(visibleAndMinimized, activeAndMinimized);
     }

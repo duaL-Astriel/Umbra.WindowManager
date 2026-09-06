@@ -187,6 +187,7 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 | `WindowManager.DisplayMode` | Select | `Auto` | Presentation mode: `Auto` (Taskbar, condensing under width pressure), `Taskbar` (icon + label), `IconOnly` (icon + tooltip), `Dropdown` (single button with a window-count badge that opens a `MenuPopup`). |
 | `WindowManager.MaxTitleWidth` | Integer | `140` | Maximum pixel width for window title labels before truncation (range: 60–300 px). |
 | `WindowManager.GroupDockedTabs` | Boolean | `true` | Whether docked tabs are visually marked (`.dock-group`) and minimized/restored collectively. |
+| `WindowManager.Decorate` | Boolean | `true` | Whether window buttons (and the dropdown button) receive Umbra background and border styling (`.decorated`). |
 
 ---
 

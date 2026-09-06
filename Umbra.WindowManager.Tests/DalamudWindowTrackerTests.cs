@@ -1,4 +1,5 @@
 using System.Linq;
+using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
 using Umbra.WindowManager.Services.WindowManager;
@@ -57,6 +58,22 @@ public class DalamudWindowTrackerTests
         win.TitleBarButtons.Last().Click?.Invoke(Dalamud.Bindings.ImGui.ImGuiMouseButton.Left);
         Assert.True(tw.IsMinimized);
         Assert.False(win.IsOpen);
+    }
+
+    [Fact]
+    public void InjectMinimizeButton_SkipsWindowsWithNoTitleBarOrNoDecoration()
+    {
+        var service = new WindowManagerService();
+        var winNoTitleBar = new DummyWindow("Overlay1") { Flags = ImGuiWindowFlags.NoTitleBar };
+        var winNoDecoration = new DummyWindow("Overlay2") { Flags = ImGuiWindowFlags.NoDecoration };
+        var tw1 = service.RegisterWindow(winNoTitleBar);
+        var tw2 = service.RegisterWindow(winNoDecoration);
+
+        DalamudWindowTracker.InjectMinimizeButton(winNoTitleBar, tw1, service);
+        DalamudWindowTracker.InjectMinimizeButton(winNoDecoration, tw2, service);
+
+        Assert.Empty(winNoTitleBar.TitleBarButtons);
+        Assert.Empty(winNoDecoration.TitleBarButtons);
     }
 
     [Fact]

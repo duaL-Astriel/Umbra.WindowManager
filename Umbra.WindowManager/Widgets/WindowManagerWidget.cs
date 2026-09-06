@@ -51,6 +51,21 @@ public class WindowManagerWidget : ToolbarWidget
     ) : base(info, guid, configValues)
     {
         this.windowManager = windowManager ?? Framework.Service<WindowManagerService>();
+
+        if (configValues != null)
+        {
+            if (configValues.TryGetValue("WindowManager.DisplayMode", out var dm) && dm is string dms)
+                this.displayMode = dms;
+            if (configValues.TryGetValue("WindowManager.MaxTitleWidth", out var mtw) && mtw is int mtwi)
+                this.maxTitleWidth = mtwi;
+            if (configValues.TryGetValue("WindowManager.GroupDockedTabs", out var gdt) && gdt is bool gdtb)
+                this.groupDockedTabs = gdtb;
+            if (configValues.TryGetValue("Decorate", out var dec) && dec is bool decb)
+                this.decorate = decb;
+            else if (configValues.TryGetValue("WindowManager.Decorate", out var wmDec) && wmDec is bool wmDecb)
+                this.decorate = wmDecb;
+        }
+
         this.rootNode = new Node
         {
             ClassList = { "widget" },
@@ -118,14 +133,21 @@ public class WindowManagerWidget : ToolbarWidget
     [ConfigVariable("WindowManager.Decorate", "General", "Window Manager")]
     public bool Decorate
     {
-        get => this.HasConfigVariable("WindowManager.Decorate")
-            ? this.GetConfigValue<bool>("WindowManager.Decorate")
-            : this.decorate;
+        get
+        {
+            if (this.HasConfigVariable("WindowManager.Decorate"))
+                return this.GetConfigValue<bool>("WindowManager.Decorate");
+            if (this.HasConfigVariable("Decorate"))
+                return this.GetConfigValue<bool>("Decorate");
+            return this.decorate;
+        }
         set
         {
             this.decorate = value;
             if (this.HasConfigVariable("WindowManager.Decorate"))
                 this.SetConfigValue("WindowManager.Decorate", value);
+            if (this.HasConfigVariable("Decorate"))
+                this.SetConfigValue("Decorate", value);
         }
     }
 
@@ -155,7 +177,11 @@ public class WindowManagerWidget : ToolbarWidget
                     { "Dropdown", "Dropdown" }
                 },
                 false
-            ),
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            },
             new IntegerWidgetConfigVariable(
                 "WindowManager.MaxTitleWidth",
                 "Max Title Width",
@@ -163,7 +189,11 @@ public class WindowManagerWidget : ToolbarWidget
                 140,
                 60,
                 300
-            ),
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            },
             new BooleanWidgetConfigVariable(
                 "WindowManager.GroupDockedTabs",
                 "Group Docked Tabs",
@@ -173,9 +203,13 @@ public class WindowManagerWidget : ToolbarWidget
             new BooleanWidgetConfigVariable(
                 "WindowManager.Decorate",
                 "Decorate",
-                "Toggle widget container styling/decoration.",
+                "Decorate window buttons and container with Umbra background and border styling.",
                 true
             )
+            {
+                Category = "General",
+                Group = "Window Manager"
+            }
         ];
     }
 
@@ -367,6 +401,7 @@ public class WindowManagerWidget : ToolbarWidget
         btnNode.ToggleClass("open", window.IsOpen);
         btnNode.ToggleClass("minimized", window.IsMinimized);
         btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
+        btnNode.ToggleClass("decorated", this.Decorate);
 
         var title = window.DisplayTitle;
         btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
@@ -485,58 +520,59 @@ public class WindowManagerWidget : ToolbarWidget
 
     private void RenderDropdown()
     {
-        var popup = this.EnsureMenuPopup();
-
-        this.toRemove.Clear();
-        foreach (var name in this.dropdownButtons.Keys)
+        if (this.EnsureMenuPopup() is { } popup)
         {
-            if (!this.currentNames.Contains(name))
-                this.toRemove.Add(name);
-        }
-
-        for (var i = 0; i < this.toRemove.Count; i++)
-        {
-            var name = this.toRemove[i];
-            if (this.dropdownButtons.Remove(name, out var btn))
-                popup.Remove(btn, true);
-        }
-
-        for (var i = 0; i < this.windowsBuffer.Count; i++)
-        {
-            var window = this.windowsBuffer[i];
-            var windowName = window.WindowName;
-            var label = $"{window.DisplayTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
-
-            if (!this.dropdownButtons.TryGetValue(windowName, out var btn))
+            this.toRemove.Clear();
+            foreach (var name in this.dropdownButtons.Keys)
             {
-                btn = new MenuPopup.Button(label)
+                if (!this.currentNames.Contains(name))
+                    this.toRemove.Add(name);
+            }
+
+            for (var i = 0; i < this.toRemove.Count; i++)
+            {
+                var name = this.toRemove[i];
+                if (this.dropdownButtons.Remove(name, out var btn))
+                    popup.Remove(btn, true);
+            }
+
+            for (var i = 0; i < this.windowsBuffer.Count; i++)
+            {
+                var window = this.windowsBuffer[i];
+                var windowName = window.WindowName;
+                var label = $"{window.DisplayTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+
+                if (!this.dropdownButtons.TryGetValue(windowName, out var btn))
                 {
-                    OnClick = () =>
+                    btn = new MenuPopup.Button(label)
                     {
-                        if (this.currentWindows.TryGetValue(windowName, out var w))
-                            this.windowManager.Toggle(w);
-                    }
-                };
-                popup.Add(btn);
-                this.dropdownButtons[windowName] = btn;
-            }
-
-            if (window.IconBytes != null)
-            {
-                var iconNode = btn.Node.QuerySelector(".icon");
-                if (iconNode != null)
-                {
-                    if (!ReferenceEquals(iconNode.Style.ImageBytes, window.IconBytes))
-                        iconNode.Style.ImageBytes = window.IconBytes;
-                    if (iconNode.NodeValue != null)
-                        iconNode.NodeValue = null;
+                        OnClick = () =>
+                        {
+                            if (this.currentWindows.TryGetValue(windowName, out var w))
+                                this.windowManager.Toggle(w);
+                        }
+                    };
+                    popup.Add(btn);
+                    this.dropdownButtons[windowName] = btn;
                 }
+
+                if (window.IconBytes != null)
+                {
+                    var iconNode = btn.Node.QuerySelector(".icon");
+                    if (iconNode != null)
+                    {
+                        if (!ReferenceEquals(iconNode.Style.ImageBytes, window.IconBytes))
+                            iconNode.Style.ImageBytes = window.IconBytes;
+                        if (iconNode.NodeValue != null)
+                            iconNode.NodeValue = null;
+                    }
+                }
+
+                if (!Equals(btn.Label, label))
+                    btn.Label = label;
+
+                btn.SortIndex = i;
             }
-
-            if (!Equals(btn.Label, label))
-                btn.Label = label;
-
-            btn.SortIndex = i;
         }
 
         if (this.dropdownNode is { } dn)
@@ -546,10 +582,22 @@ public class WindowManagerWidget : ToolbarWidget
             if (!Equals(badgeNode.NodeValue, countStr))
                 badgeNode.NodeValue = countStr;
             dn.Tooltip = this.windowsBuffer.Count == 1 ? "1 open window" : $"{this.windowsBuffer.Count} open windows";
+            dn.ToggleClass("decorated", this.Decorate);
         }
     }
 
-    private MenuPopup EnsureMenuPopup() => this.menuPopup ??= new MenuPopup();
+    private MenuPopup? EnsureMenuPopup()
+    {
+        if (this.menuPopup != null) return this.menuPopup;
+        try
+        {
+            return this.menuPopup = new MenuPopup();
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     // --- Context menu (issue #3) --------------------------------------------------------------------
 
