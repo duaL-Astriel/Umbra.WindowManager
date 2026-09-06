@@ -45,18 +45,18 @@ public class ImGuiContextMonitorValidationTests
     }
 
     [Theory]
-    // A window bound to a dock node with more than one member is a dock-group member. This holds even
-    // for inactive/background tabs, whose per-frame DockIsActive flag is false -- the previous gate
-    // stripped their dock group association and broke group minimize (issue #25).
-    [InlineData(true, 2, true)]
-    [InlineData(true, 5, true)]
-    // A window alone in its dock node is not a group (no shared tab bar / titlebar collision).
-    [InlineData(true, 1, false)]
-    // A floating window (no bound dock node) is never a group, even if a stale member count is reported.
-    [InlineData(false, 0, false)]
-    [InlineData(false, 3, false)]
-    public void IsDockGroupMember_EvaluatesFromDockNodeMembership(bool hasDockNode, int dockNodeWindowCount, bool expected)
+    // The Dalamud ImGui binding reports ImGuiWindow.DockNode as null from our OnDraw hook even for
+    // docked windows, so membership is derived from the persistent DockId plus DockNodeIsVisible instead
+    // (issue #25). A window currently bound to a visible dock node has a nonzero DockId and is node-visible.
+    [InlineData(5u, true, true)]
+    // A previously-docked, now-floating window retains its old DockId as a backup but is no longer
+    // node-visible, so it must not be grouped with the windows still in that node.
+    [InlineData(5u, false, false)]
+    // A window that was never docked has DockId 0.
+    [InlineData(0u, true, false)]
+    [InlineData(0u, false, false)]
+    public void IsWindowDocked_EvaluatesFromDockIdAndNodeVisibility(uint dockId, bool dockNodeVisible, bool expected)
     {
-        Assert.Equal(expected, ImGuiContextMonitor.IsDockGroupMember(hasDockNode, dockNodeWindowCount));
+        Assert.Equal(expected, ImGuiContextMonitor.IsWindowDocked(dockId, dockNodeVisible));
     }
 }

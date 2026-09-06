@@ -34,15 +34,16 @@ public class ImGuiContextMonitor
         contentSize.X > 0 || contentSize.Y > 0 || drawCmdCount > 2;
 
     /// <summary>
-    /// Whether a window should be tracked as a member of a multi-window dock group this frame.
-    /// Membership is derived from the window's bound dock node and its member count, NOT from the
-    /// per-frame <c>DockIsActive</c> flag: inactive/background tabs report <c>DockIsActive == false</c>,
-    /// which previously stripped their <see cref="TrackedWindow.DockGroupKey"/> every frame, collapsed
-    /// the group to a single member, and made the minimize action fall back to standalone minimization
-    /// instead of minimizing the whole group (issue #25).
+    /// Whether a window is currently bound to a live ImGui dock node this frame. The Dalamud ImGui
+    /// binding reports <c>ImGuiWindow.DockNode</c> as null from our <c>OnDraw</c> hook even for docked
+    /// windows, and <c>DockIsActive</c> is false for inactive/background tabs, so neither is a usable
+    /// signal. Instead we use the persistent <c>DockId</c> (a nonzero backup of the last node id, retained
+    /// even after a window floats again) together with <c>DockNodeIsVisible</c> (true only while the
+    /// window is actually docked into a visible node). Windows that are docked and share a <c>DockId</c>
+    /// form a dock group (issue #25).
     /// </summary>
-    public static bool IsDockGroupMember(bool hasDockNode, int dockNodeWindowCount) =>
-        hasDockNode && dockNodeWindowCount > 1;
+    public static bool IsWindowDocked(uint dockId, bool dockNodeVisible) =>
+        dockId != 0 && dockNodeVisible;
 
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
@@ -129,20 +130,18 @@ public class ImGuiContextMonitor
                 tracked.HasConfirmedUi = false;
             }
 
-            // Whether this window is a background/active tab in a multi-window dock node. Derived from the
-            // bound dock node (not the per-frame DockIsActive flag) so inactive tabs are handled too (#25).
-            var dockNode = win.DockNode;
-            var isDockGroupMember = IsDockGroupMember(!dockNode.IsNull, dockNode.IsNull ? 0 : dockNode.Windows.Size);
+            // Whether this window is currently docked into a (visible) node this frame. See IsWindowDocked:
+            // the DockNode pointer reads as null here, so we rely on DockId + DockNodeIsVisible (#25).
+            var isDocked = IsWindowDocked(win.DockId, win.DockNodeIsVisible);
 
-            // Continuous injection check: keep the minimize button in sync with dock state. Docked tabs get
-            // it removed (Dalamud draws it inside the client area where it collides with plugin controls,
-            // issue #25); floating/standalone windows keep it re-injected in case a plugin cleared buttons.
+            // Continuous injection check: keep the minimize button in sync with dock state. The shared
+            // InjectMinimizeButton routine suppresses the button whenever DockGroupKey is set (populated
+            // below once full node membership is known), so dock-group tabs -- where Dalamud draws the
+            // button inside the client area, colliding with plugin controls (issue #25) -- lose it, while
+            // floating/standalone windows keep it re-injected in case a plugin cleared buttons.
             if (tracked.TryGetWindow(out var dalamudWindow))
             {
-                if (isDockGroupMember)
-                    DalamudWindowTracker.RemoveMinimizeButton(dalamudWindow);
-                else
-                    DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
+                DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
             }
 
             // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
@@ -168,10 +167,10 @@ public class ImGuiContextMonitor
                 }
             }
 
-            // 2. Dock node tracking. Every window bound to the multi-window node is collected as it is
-            // iterated (each shares the same DockId), so background tabs -- whose DockIsActive is false --
-            // are no longer dropped from the group (issue #25).
-            if (isDockGroupMember)
+            // 2. Dock node tracking. Windows are grouped by their shared DockId (the DockNode pointer is
+            // null from here). Background tabs -- whose DockIsActive is false but which are still docked
+            // and node-visible -- are collected too, so the group keeps all its members (issue #25).
+            if (isDocked)
             {
                 var dockId = win.DockId;
                 if (!this.dockGroups.TryGetValue(dockId, out var groupMembers))
