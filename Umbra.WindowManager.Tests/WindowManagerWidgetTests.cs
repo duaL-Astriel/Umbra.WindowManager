@@ -422,5 +422,39 @@ public class WindowManagerWidgetTests
         Assert.Equal("caret", caretNode.Id);
         Assert.Equal("▾", caretNode.NodeValue);
     }
+
+    [Fact]
+    public void WindowButton_IconNode_HasExplicitSizeAndScaleMode()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+        var win = new DummyWindow("TestWindow") { IsOpen = true };
+        var tw = service.RegisterWindow(win);
+
+        widget.UpdateButtons();
+
+        // Find the created button
+        Assert.Single(widget.Node.ChildNodes);
+        var btnNode = widget.Node.ChildNodes[0];
+        var iconNode = btnNode.ChildNodes.FirstOrDefault(c => c.Id == "icon");
+
+        Assert.NotNull(iconNode);
+        Assert.NotNull(iconNode!.Style.Size);
+        Assert.Equal(18f, iconNode.Style.Size.Width);
+        Assert.Equal(18f, iconNode.Style.Size.Height);
+        Assert.Equal(Una.Drawing.ImageScaleMode.Adapt, iconNode.Style.ImageScaleMode);
+
+        // When IconBytes is null, monogram text is shown
+        Assert.Equal("T", iconNode.NodeValue);
+        Assert.Null(iconNode.Style.ImageBytes);
+
+        // When IconBytes is provided, ImageBytes is set and NodeValue is cleared
+        var fakePng = new byte[] { 1, 2, 3 };
+        tw.IconBytes = fakePng;
+        widget.UpdateButtons();
+
+        Assert.Null(iconNode.NodeValue);
+        Assert.Same(fakePng, iconNode.Style.ImageBytes);
+    }
 }
 
