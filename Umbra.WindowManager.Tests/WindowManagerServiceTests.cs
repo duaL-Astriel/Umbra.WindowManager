@@ -77,6 +77,32 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_Toggle_ExplicitWasFocused_OverridesTrackedWindowFocus()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Override Focus Window") { IsOpen = true, IsFocused = false, RequestFocus = false };
+        var tw = service.RegisterWindow(win);
+
+        // Even if win.IsFocused is false, explicit wasFocused: true minimizes
+        service.Toggle(tw, wasFocused: true);
+        Assert.True(tw.IsMinimized);
+        Assert.False(win.IsOpen);
+
+        // Restore
+        service.Toggle(tw);
+        Assert.True(win.IsOpen);
+        Assert.False(tw.IsMinimized);
+
+        // Even if win.IsFocused is true, explicit wasFocused: false brings to front instead of minimize
+        win.IsFocused = true;
+        win.RequestFocus = false;
+        service.Toggle(tw, wasFocused: false);
+        Assert.False(tw.IsMinimized);
+        Assert.True(win.IsOpen);
+        Assert.True(win.RequestFocus);
+    }
+
+    [Fact]
     public void WindowManagerService_Toggle_ClosedNotMinimized_Restores()
     {
         var service = new WindowManagerService();
