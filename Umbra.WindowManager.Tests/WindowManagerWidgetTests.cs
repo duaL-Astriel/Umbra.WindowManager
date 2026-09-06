@@ -443,6 +443,14 @@ public class WindowManagerWidgetTests
         Assert.Equal(18f, iconNode.Style.Size.Width);
         Assert.Equal(18f, iconNode.Style.Size.Height);
         Assert.Equal(Una.Drawing.ImageScaleMode.Adapt, iconNode.Style.ImageScaleMode);
+        Assert.Equal(Una.Drawing.Anchor.MiddleLeft, iconNode.Style.Anchor);
+
+        var labelNode = btnNode.ChildNodes.FirstOrDefault(c => c.Id == "label");
+        Assert.NotNull(labelNode);
+        // Both icon and label must share Anchor.MiddleLeft so Una.Drawing groups them in the same
+        // layout pass and places them sequentially along the horizontal flow instead of overlapping
+        Assert.Equal(Una.Drawing.Anchor.MiddleLeft, labelNode!.Style.Anchor);
+        Assert.Equal(Una.Drawing.Anchor.MiddleLeft, labelNode.Style.TextAlign);
 
         // When IconBytes is null, monogram text is shown
         Assert.Equal("T", iconNode.NodeValue);
