@@ -16,6 +16,37 @@ namespace Umbra.WindowManager.Widgets;
 )]
 public class WindowManagerWidget : ToolbarWidget
 {
+    // Scoped stylesheet for the widget's subtree. The root is a raw Node, which carries no stylesheet
+    // of its own, so toggling the ".decorated" class produced no visual change (issue #19). Attaching
+    // this stylesheet gives the inline window buttons and the dropdown trigger Umbra's themed
+    // background + border when decorated, plus hover and focused (".active") accents. Every rule is
+    // scoped by the "window-btn"/"dropdown-btn" class so styling never leaks to sibling nodes.
+    private static readonly Stylesheet WidgetStylesheet = new(
+    [
+        new Stylesheet.StyleDefinition(
+            ".window-btn.decorated, .dropdown-btn.decorated",
+            new Style
+            {
+                BackgroundColor = new Color("Widget.Background"),
+                BorderColor = new BorderColor(new Color("Widget.Border")),
+                BorderWidth = new EdgeSize(1)
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn.decorated:hover, .dropdown-btn.decorated:hover",
+            new Style
+            {
+                BackgroundColor = new Color("Widget.BackgroundHover"),
+                BorderColor = new BorderColor(new Color("Widget.BorderHover"))
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn.decorated.active, .dropdown-btn.decorated.active",
+            new Style
+            {
+                BackgroundColor = new Color("Widget.BackgroundHover"),
+                BorderColor = new BorderColor(new Color("Widget.BorderHover"))
+            })
+    ]);
+
     private readonly WindowManagerService windowManager;
     private readonly Node rootNode;
     private readonly Dictionary<string, Node> windowNodes = [];
@@ -69,6 +100,7 @@ public class WindowManagerWidget : ToolbarWidget
         this.rootNode = new Node
         {
             ClassList = { "widget" },
+            Stylesheet = WidgetStylesheet,
             Style =
             {
                 Flow = Flow.Horizontal,
@@ -342,6 +374,7 @@ public class WindowManagerWidget : ToolbarWidget
     {
         var node = new Node
         {
+            ClassList = { "window-btn" },
             Style =
             {
                 Flow = Flow.Horizontal,
@@ -470,6 +503,7 @@ public class WindowManagerWidget : ToolbarWidget
         return new Node
         {
             Tooltip = "Windows",
+            ClassList = { "dropdown-btn" },
             Style =
             {
                 Flow = Flow.Horizontal,
