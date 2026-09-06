@@ -20,6 +20,9 @@ public class TrackedWindow
     public string WindowName { get; }
     public string CleanTitle { get; }
     public string Id { get; }
+    public string DisplayTitle => !string.IsNullOrWhiteSpace(this.CleanTitle)
+        ? this.CleanTitle
+        : (!string.IsNullOrWhiteSpace(this.Id) ? this.Id : this.WindowName);
     public string Namespace { get; set; }
     public bool IsMinimized { get; set; }
     public string? DockGroupKey { get; set; }
