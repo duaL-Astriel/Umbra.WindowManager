@@ -61,6 +61,21 @@ public class ImGuiContextMonitor
                 continue;
             }
 
+            // 1b. Title bar double click: minimize window cleanly to toolbar
+            if (ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left) &&
+                (win.Flags & ImGuiWindowFlags.NoTitleBar) == 0 &&
+                ctx.HoveredWindow == win)
+            {
+                var mousePos = ImGui.GetMousePos();
+                var titleBarHeight = ImGui.GetFontSize() + ImGui.GetStyle().FramePadding.Y * 2.0f;
+                if (mousePos.X >= win.Pos.X && mousePos.X <= win.Pos.X + win.Size.X &&
+                    mousePos.Y >= win.Pos.Y && mousePos.Y <= win.Pos.Y + titleBarHeight)
+                {
+                    this.windowManager.Minimize(tracked);
+                    continue;
+                }
+            }
+
             // 2. Dock node tracking
             if (win.DockIsActive && !win.DockNode.IsNull)
             {

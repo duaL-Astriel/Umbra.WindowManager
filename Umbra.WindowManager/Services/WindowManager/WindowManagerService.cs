@@ -30,8 +30,11 @@ public class WindowManagerService
         {
             if (w.TryGetWindow(out _))
             {
+                if (!w.IsManageable)
+                    continue;
+
                 var hasTitle = !string.IsNullOrWhiteSpace(w.CleanTitle) || !string.IsNullOrWhiteSpace(w.Id);
-                if (w.IsEligibleWindow && ((w.IsOpen && !string.IsNullOrWhiteSpace(w.CleanTitle)) || (w.IsMinimized && hasTitle)))
+                if ((w.IsOpen && !string.IsNullOrWhiteSpace(w.CleanTitle)) || (w.IsMinimized && hasTitle))
                     destination.Add(w);
             }
             else

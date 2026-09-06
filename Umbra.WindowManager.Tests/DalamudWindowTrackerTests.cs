@@ -271,4 +271,83 @@ public class DalamudWindowTrackerTests
         Assert.Contains(tracked, t => t.WindowName == "BaseClassWindow");
         Assert.Contains(tracked, t => t.WindowName == "DerivedClassWindow");
     }
+
+    [Fact]
+    public void InjectMinimizeButton_SetsNoCollapseFlagOnManagedWindow()
+    {
+        var win = new DummyWindow("ManagedWindow");
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(win);
+
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
+
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+
+        Assert.NotEqual(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
+    }
+
+    [Fact]
+    public void InjectMinimizeButton_DoesNotInjectOnUnmanageableWindow()
+    {
+        var win = new DummyWindow("Overlay") { Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar };
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(win);
+
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+
+        Assert.Empty(win.TitleBarButtons);
+    }
+
+    [Fact]
+    public void InjectMinimizeButton_HooksExistingPluginMinimizeButton()
+    {
+        var win = new DummyWindow("CustomMinimizeWin");
+        var originalCalled = false;
+        var customButton = new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.WindowMinimize,
+            Priority = 0,
+            Click = _ => { originalCalled = true; }
+        };
+        win.TitleBarButtons.Add(customButton);
+
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(win);
+
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
+
+        // Clicking the plugin's own button should invoke both the plugin handler and service.Minimize
+        customButton.Click?.Invoke(Dalamud.Bindings.ImGui.ImGuiMouseButton.Left);
+        Assert.True(originalCalled);
+        Assert.True(tw.IsMinimized);
+    }
+
+    [Fact]
+    public void LoadPluginIcon_LoadsFromDiskCacheIfExists()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var fakePluginName = "TestPluginCache_" + System.Guid.NewGuid().ToString("N");
+        var cachedPath = DalamudWindowTracker.GetCachedIconPath(fakePluginName);
+        var dir = System.IO.Path.GetDirectoryName(cachedPath)!;
+        System.IO.Directory.CreateDirectory(dir);
+
+        var fakeBytes = new byte[] { 0x89, 0x50, 0x4E, 0x47 }; // PNG header
+        System.IO.File.WriteAllBytes(cachedPath, fakeBytes);
+
+        try
+        {
+            // Object with empty dummy properties for reflection
+            var dummyPlugin = new object();
+            var loaded = tracker.LoadPluginIcon(dummyPlugin, fakePluginName, null);
+            Assert.NotNull(loaded);
+            Assert.Equal(fakeBytes, loaded);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(cachedPath))
+                System.IO.File.Delete(cachedPath);
+        }
+    }
 }
