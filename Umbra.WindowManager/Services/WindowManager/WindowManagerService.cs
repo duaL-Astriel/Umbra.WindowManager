@@ -30,7 +30,7 @@ public class WindowManagerService
         {
             if (w.TryGetWindow(out _))
             {
-                if ((w.IsOpen || w.IsMinimized) && !string.IsNullOrWhiteSpace(w.CleanTitle))
+                if (w.IsEligibleWindow && (w.IsOpen || w.IsMinimized) && !string.IsNullOrWhiteSpace(w.CleanTitle))
                     destination.Add(w);
             }
             else
