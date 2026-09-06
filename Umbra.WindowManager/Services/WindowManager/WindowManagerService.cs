@@ -178,6 +178,13 @@ public class WindowManagerService
         this.dockGroups[groupKey] = new DockGroup(groupKey, activeWindowName, members);
     }
 
+    /// <summary>
+    /// Returns the currently registered dock group for the given key, or <c>null</c> if none is
+    /// registered. Used by the toolbar to collapse a docked tab set into a single grouped button.
+    /// </summary>
+    public DockGroup? GetDockGroup(string groupKey) =>
+        this.dockGroups.TryGetValue(groupKey, out var group) ? group : null;
+
     /// <summary>Test/diagnostic accessor for the currently registered dock group, if any.</summary>
     internal DockGroup? PeekDockGroup(string groupKey) =>
         this.dockGroups.TryGetValue(groupKey, out var group) ? group : null;
