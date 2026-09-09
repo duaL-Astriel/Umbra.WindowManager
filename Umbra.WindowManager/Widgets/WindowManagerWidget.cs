@@ -44,6 +44,50 @@ public class WindowManagerWidget : ToolbarWidget
             {
                 BackgroundColor = new Color("Widget.BackgroundHover"),
                 BorderColor = new BorderColor(new Color("Widget.BorderHover"))
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn-label, .window-btn-icon, .dropdown-btn-icon, .dropdown-btn-badge",
+            new Style
+            {
+                Color = new Color("Widget.Text"),
+                OutlineColor = new Color("Widget.TextOutline"),
+                OutlineSize = 2,
+                TextShadowColor = new Color(0xFF000000),
+                TextShadowSize = 8
+            }),
+        new Stylesheet.StyleDefinition(
+            ".dropdown-btn-caret",
+            new Style
+            {
+                Color = new Color("Widget.TextMuted"),
+                OutlineColor = new Color("Widget.TextOutline"),
+                OutlineSize = 1,
+                TextShadowColor = new Color(0xFF000000),
+                TextShadowSize = 8
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn:hover, .dropdown-btn:hover",
+            new Style
+            {
+                Color = new Color("Widget.TextHover")
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn.active, .dropdown-btn.active",
+            new Style
+            {
+                Color = new Color("Widget.TextHover")
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn:hover .window-btn-label, .window-btn:hover .window-btn-icon, .dropdown-btn:hover .dropdown-btn-icon, .dropdown-btn:hover .dropdown-btn-badge, .dropdown-btn:hover .dropdown-btn-caret",
+            new Style
+            {
+                Color = new Color("Widget.TextHover")
+            }),
+        new Stylesheet.StyleDefinition(
+            ".window-btn.active .window-btn-label, .window-btn.active .window-btn-icon",
+            new Style
+            {
+                Color = new Color("Widget.TextHover")
             })
     ]);
 
@@ -464,7 +508,7 @@ public class WindowManagerWidget : ToolbarWidget
                 Flow = Flow.Horizontal,
                 Gap = 6,
                 Padding = new EdgeSize(4, 6, 4, 6),
-                BorderRadius = 4,
+                BorderRadius = 5,
                 RoundedCorners = RoundedCorners.All,
                 Anchor = Anchor.MiddleCenter
             },
@@ -473,12 +517,18 @@ public class WindowManagerWidget : ToolbarWidget
                 new Node
                 {
                     Id = "icon",
+                    ClassList = { "window-btn-icon" },
                     Style =
                     {
                         Size = new Size(18, 18),
                         Anchor = Anchor.MiddleLeft,
                         TextAlign = Anchor.MiddleCenter,
+                        Font = 0,
                         FontSize = 12,
+                        OutlineColor = new Color("Widget.TextOutline"),
+                        OutlineSize = 2,
+                        TextShadowColor = new Color(0xFF000000),
+                        TextShadowSize = 8,
                         ImageScaleMode = ImageScaleMode.Adapt,
                         ImageRounding = 3
                     }
@@ -486,10 +536,17 @@ public class WindowManagerWidget : ToolbarWidget
                 new Node
                 {
                     Id = "label",
+                    ClassList = { "window-btn-label" },
                     Style =
                     {
                         Anchor = Anchor.MiddleLeft,
                         TextAlign = Anchor.MiddleLeft,
+                        Font = 0,
+                        FontSize = 13,
+                        OutlineColor = new Color("Widget.TextOutline"),
+                        OutlineSize = 2,
+                        TextShadowColor = new Color(0xFF000000),
+                        TextShadowSize = 8,
                         WordWrap = false,
                         TextOverflow = false // clip + ellipsize instead of overflowing (issue #8.4)
                     }
@@ -612,7 +669,7 @@ public class WindowManagerWidget : ToolbarWidget
                 Flow = Flow.Horizontal,
                 Gap = 4,
                 Padding = new EdgeSize(4, 6, 4, 6),
-                BorderRadius = 4,
+                BorderRadius = 5,
                 RoundedCorners = RoundedCorners.All
             },
             ChildNodes =
@@ -620,11 +677,16 @@ public class WindowManagerWidget : ToolbarWidget
                 new Node
                 {
                     Id = "icon",
+                    ClassList = { "dropdown-btn-icon" },
                     NodeValue = FontAwesomeIcon.WindowRestore.ToIconString(),
                     Style =
                     {
                         Font = 2,
                         FontSize = 13,
+                        OutlineColor = new Color("Widget.TextOutline"),
+                        OutlineSize = 2,
+                        TextShadowColor = new Color(0xFF000000),
+                        TextShadowSize = 8,
                         Anchor = Anchor.MiddleCenter,
                         TextAlign = Anchor.MiddleCenter
                     }
@@ -632,10 +694,16 @@ public class WindowManagerWidget : ToolbarWidget
                 new Node
                 {
                     Id = "badge",
+                    ClassList = { "dropdown-btn-badge" },
                     NodeValue = "0",
                     Style =
                     {
-                        FontSize = 12,
+                        Font = 0,
+                        FontSize = 13,
+                        OutlineColor = new Color("Widget.TextOutline"),
+                        OutlineSize = 2,
+                        TextShadowColor = new Color(0xFF000000),
+                        TextShadowSize = 8,
                         Anchor = Anchor.MiddleCenter,
                         TextAlign = Anchor.MiddleCenter
                     }
@@ -643,10 +711,15 @@ public class WindowManagerWidget : ToolbarWidget
                 new Node
                 {
                     Id = "caret",
+                    ClassList = { "dropdown-btn-caret" },
                     NodeValue = "▾",
                     Style =
                     {
                         FontSize = 10,
+                        OutlineColor = new Color("Widget.TextOutline"),
+                        OutlineSize = 1,
+                        TextShadowColor = new Color(0xFF000000),
+                        TextShadowSize = 8,
                         Anchor = Anchor.MiddleCenter,
                         TextAlign = Anchor.MiddleCenter
                     }

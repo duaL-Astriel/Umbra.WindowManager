@@ -825,6 +825,177 @@ public class WindowManagerWidgetTests
         Assert.Equal("General", blVar.Category);
         Assert.Equal("Window Manager", blVar.Group);
     }
+
+    [Fact]
+    public void WindowButton_HasStandardTypographyAndBorderRadius()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+        var win = new DummyWindow("TestWindow") { IsOpen = true };
+        service.RegisterWindow(win);
+
+        widget.UpdateButtons();
+
+        Assert.Single(widget.Node.ChildNodes);
+        var btnNode = widget.Node.ChildNodes[0];
+        Assert.Equal(5f, btnNode.Style.BorderRadius);
+
+        var labelNode = btnNode.ChildNodes.FirstOrDefault(c => c.Id == "label");
+        Assert.NotNull(labelNode);
+        Assert.Equal(13, labelNode!.Style.FontSize);
+        Assert.Equal((uint)0, labelNode.Style.Font);
+        // Inline Color must be null so WidgetStylesheet handles normal ("Widget.Text") and hover/active ("Widget.TextHover") without being blocked
+        Assert.Null(labelNode.Style.Color);
+        Assert.Equal("Widget.TextOutline", labelNode.Style.OutlineColor?.Name);
+        Assert.Equal(2, labelNode.Style.OutlineSize);
+        Assert.Equal(8f, labelNode.Style.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), labelNode.Style.TextShadowColor);
+        Assert.Contains("window-btn-label", labelNode.ClassList);
+
+        var iconNode = btnNode.ChildNodes.FirstOrDefault(c => c.Id == "icon");
+        Assert.NotNull(iconNode);
+        Assert.Equal(12, iconNode!.Style.FontSize);
+        Assert.Equal((uint)0, iconNode.Style.Font);
+        Assert.Null(iconNode.Style.Color);
+        Assert.Equal("Widget.TextOutline", iconNode.Style.OutlineColor?.Name);
+        Assert.Equal(2, iconNode.Style.OutlineSize);
+        Assert.Equal(8f, iconNode.Style.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), iconNode.Style.TextShadowColor);
+        Assert.Contains("window-btn-icon", iconNode.ClassList);
+    }
+
+    [Fact]
+    public void DropdownNode_HasStandardTypographyAndBorderRadius()
+    {
+        var ddNode = WindowManagerWidget.CreateDropdownNode();
+        Assert.Equal(5f, ddNode.Style.BorderRadius);
+
+        var iconNode = ddNode.ChildNodes.FirstOrDefault(c => c.Id == "icon");
+        Assert.NotNull(iconNode);
+        Assert.Equal((uint)2, iconNode!.Style.Font);
+        Assert.Equal(13, iconNode.Style.FontSize);
+        Assert.Null(iconNode.Style.Color);
+        Assert.Equal("Widget.TextOutline", iconNode.Style.OutlineColor?.Name);
+        Assert.Equal(2, iconNode.Style.OutlineSize);
+        Assert.Equal(8f, iconNode.Style.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), iconNode.Style.TextShadowColor);
+        Assert.Contains("dropdown-btn-icon", iconNode.ClassList);
+
+        var badgeNode = ddNode.ChildNodes.FirstOrDefault(c => c.Id == "badge");
+        Assert.NotNull(badgeNode);
+        Assert.Equal((uint)0, badgeNode!.Style.Font);
+        Assert.Equal(13, badgeNode.Style.FontSize);
+        Assert.Null(badgeNode.Style.Color);
+        Assert.Equal("Widget.TextOutline", badgeNode.Style.OutlineColor?.Name);
+        Assert.Equal(2, badgeNode.Style.OutlineSize);
+        Assert.Equal(8f, badgeNode.Style.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), badgeNode.Style.TextShadowColor);
+        Assert.Contains("dropdown-btn-badge", badgeNode.ClassList);
+
+        var caretNode = ddNode.ChildNodes.FirstOrDefault(c => c.Id == "caret");
+        Assert.NotNull(caretNode);
+        Assert.Equal(10, caretNode!.Style.FontSize);
+        Assert.Null(caretNode.Style.Color);
+        Assert.Equal("Widget.TextOutline", caretNode.Style.OutlineColor?.Name);
+        Assert.Equal(1, caretNode.Style.OutlineSize);
+        Assert.Equal(8f, caretNode.Style.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), caretNode.Style.TextShadowColor);
+        Assert.Contains("dropdown-btn-caret", caretNode.ClassList);
+    }
+
+    [Fact]
+    public void Stylesheet_DefinesBaseTypographyAndTextShadow()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        var rules = widget.Node.Stylesheet!.GetRuleList();
+
+        // Base rule for labels, icons, badges
+        var baseTextRule = rules
+            .FirstOrDefault(r => r.Key.Contains(".window-btn-label") && !r.Key.Contains(":hover") && !r.Key.Contains(".active"));
+        Assert.NotNull(baseTextRule.Value);
+        Assert.Equal("Widget.Text", baseTextRule.Value.Color?.Name);
+        Assert.Equal("Widget.TextOutline", baseTextRule.Value.OutlineColor?.Name);
+        Assert.Equal(2, baseTextRule.Value.OutlineSize);
+        Assert.Equal(8f, baseTextRule.Value.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), baseTextRule.Value.TextShadowColor);
+
+        // Base rule for caret
+        var caretRule = rules
+            .FirstOrDefault(r => r.Key.Contains(".dropdown-btn-caret") && !r.Key.Contains(":hover") && !r.Key.Contains(".active"));
+        Assert.NotNull(caretRule.Value);
+        Assert.Equal("Widget.TextMuted", caretRule.Value.Color?.Name);
+        Assert.Equal("Widget.TextOutline", caretRule.Value.OutlineColor?.Name);
+        Assert.Equal(1, caretRule.Value.OutlineSize);
+        Assert.Equal(8f, caretRule.Value.TextShadowSize);
+        Assert.Equal(new Color(0xFF000000), caretRule.Value.TextShadowColor);
+    }
+
+    [Fact]
+    public void Stylesheet_DefinesTextHoverAndActiveStyles()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        var rules = widget.Node.Stylesheet!.GetRuleList();
+
+        var textHoverColorRules = rules
+            .Where(r => r.Value.Color is { } c && c.Name == "Widget.TextHover")
+            .ToList();
+
+        Assert.NotEmpty(textHoverColorRules);
+        Assert.Contains(textHoverColorRules, r => r.Key.Contains(":hover"));
+        Assert.Contains(textHoverColorRules, r => r.Key.Contains(".active"));
+
+        // Still adheres strictly to scoping: all selectors must contain window-btn or dropdown-btn
+        Assert.All(rules.Keys, selector =>
+            Assert.True(selector.Contains("window-btn") || selector.Contains("dropdown-btn"),
+                $"Unscoped stylesheet selector: {selector}"));
+    }
+
+    [Fact]
+    public void ComputedStyle_ResolvesBrighterTextAndShadow_InNormalAndActiveStates()
+    {
+        Color.AssignByName("Widget.Text", 0xFFD0D0D0);
+        Color.AssignByName("Widget.TextHover", 0xFFFFFFFF);
+        Color.AssignByName("Widget.TextOutline", 0x80000000);
+
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+        var win = new DummyWindow("TestWindow") { IsOpen = true, IsFocused = false };
+        service.RegisterWindow(win);
+
+        widget.UpdateButtons();
+
+        var btnNode = widget.Node.ChildNodes[0];
+        var labelNode = btnNode.ChildNodes.First(c => c.Id == "label");
+
+        var csfType = typeof(Node).Assembly.GetType("Una.Drawing.ComputedStyleFactory")!;
+        var createMethod = csfType.GetMethod("Create", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static, [typeof(Node)])!;
+
+        // 1. Normal state: Color is Widget.Text (#ffd0d0d0), TextShadowSize is 8, TextShadowColor is black
+        var normalResult = createMethod.Invoke(null, [labelNode])!;
+        var normalCs = normalResult.GetType().GetField("Item2")!.GetValue(normalResult)!;
+        var normalColor = (Color)normalCs.GetType().GetField("Color")!.GetValue(normalCs)!;
+        var normalShadowSize = (float)normalCs.GetType().GetField("TextShadowSize")!.GetValue(normalCs)!;
+        var normalShadowColor = (Color)normalCs.GetType().GetField("TextShadowColor")!.GetValue(normalCs)!;
+
+        Assert.Equal("Widget.Text", normalColor.Name);
+        Assert.Equal(8f, normalShadowSize);
+        Assert.Equal(new Color(0xFF000000), normalShadowColor);
+
+        // 2. Active state: Focused window gets .active class, text turns bright solid white Widget.TextHover (#ffffffff)
+        win.IsFocused = true;
+        widget.UpdateButtons();
+        Assert.Contains("active", btnNode.ClassList);
+
+        var activeResult = createMethod.Invoke(null, [labelNode])!;
+        var activeCs = activeResult.GetType().GetField("Item2")!.GetValue(activeResult)!;
+        var activeColor = (Color)activeCs.GetType().GetField("Color")!.GetValue(activeCs)!;
+
+        Assert.Equal("Widget.TextHover", activeColor.Name);
+    }
 }
 
 
