@@ -2,7 +2,6 @@
 
 [![Build and Test](https://img.shields.io/badge/build-passing-brightgreen.svg)](#building--testing)
 [![Target](https://img.shields.io/badge/.NET-10.0--windows-blue.svg)](https://dotnet.microsoft.com/)
-[![License](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://www.gnu.org/licenses/agpl-3.0.html)
 
 **Umbra Window Manager** is a plugin for [Umbra](https://github.com/una-xiv/umbra) (the customizable HUD and toolbar framework for Final Fantasy XIV via [Dalamud](https://goatcorp.github.io/)).
 
@@ -206,9 +205,3 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 | **Title Bar Button** | Any window | Clicks the injected minimize button (`FontAwesomeIcon.WindowMinimize`) to minimize. |
 | **Double-Click Title Bar** | Native ImGui collapse | Intercepted and routed to full window minimize. |
 
----
-
-## License
-
-This project is licensed under the GNU Affero General Public License v3.0 or later ([AGPL-3.0-or-later](https://www.gnu.org/licenses/agpl-3.0.html)).
-Copyright &copy; 2026 Astriel.
