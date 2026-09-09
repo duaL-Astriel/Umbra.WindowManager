@@ -24,7 +24,8 @@ It acts as a comprehensive taskbar and window manager for the entire Dalamud plu
 - **Safe Memory Management**: All external window references are held weakly via `WeakReference<IWindow>`, preventing memory leaks or blocking plugins from unloading.
 - **Flexible Toolbar Widget**:
   - Built with `Una.Drawing.Node` layout system.
-  - Interactive states: `.active` (accented when focused), `.open` (standard background), `.minimized` (dimmed at 60% opacity), `.dock-group` (pill indicator for grouped tabs).
+  - Interactive states: `.active` (accented when focused), `.open` (standard background), `.minimized` (dimmed at 60% opacity), `.dock-group` (a collapsed group of docked tabs).
+  - Grouped dock tabs collapse into a single split-view button: at two members each side shows icon + title separated by a divider; past two members the titles drop to an icon-only split row so the button stays compact. The active tab reads at full strength; the others recede. One left-click toggles the whole group.
   - Per-window icons: renders the owning plugin's icon (`images/icon.png`, resolved via reflection) with a text-monogram fallback, so Icon-Only mode always shows something scannable.
   - Configurable display modes, all functional: `Taskbar` (icon + label), `IconOnly` (icon + tooltip), `Dropdown` (single button with a window-count badge opening an Umbra `MenuPopup`), and `Auto` (starts as Taskbar and condenses toward IconOnly/Dropdown as toolbar width tightens).
   - Left-click to focus, bring to front, or toggle minimize/restore; right-click opens a per-state context menu (Minimize/Restore, Close; or Select Active Tab / Close All Tabs for dock groups).
@@ -186,7 +187,7 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 |---|---|---|---|
 | `WindowManager.DisplayMode` | Select | `Auto` | Presentation mode: `Auto` (Taskbar, condensing under width pressure), `Taskbar` (icon + label), `IconOnly` (icon + tooltip), `Dropdown` (single button with a window-count badge that opens a `MenuPopup`). |
 | `WindowManager.MaxTitleWidth` | Integer | `140` | Maximum pixel width for window title labels before truncation (range: 60–300 px). |
-| `WindowManager.GroupDockedTabs` | Boolean | `true` | Whether docked tabs are visually marked (`.dock-group`) and minimized/restored collectively. |
+| `WindowManager.GroupDockedTabs` | Boolean | `true` | Whether docked tabs collapse into a single split-view toolbar button (icon + title per member at two, icons only past two) and are minimized/restored collectively. When off, each docked tab keeps its own button. |
 | `WindowManager.Decorate` | Boolean | `true` | Whether window buttons (and the dropdown button) receive Umbra background and border styling (`.decorated`). |
 
 ---
