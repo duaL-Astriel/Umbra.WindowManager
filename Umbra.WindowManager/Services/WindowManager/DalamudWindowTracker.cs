@@ -25,6 +25,10 @@ public class DalamudWindowTracker
 
     // Caches resolved plugin icon bytes by plugin internal name (null = looked up, none found).
     private readonly ConcurrentDictionary<string, byte[]?> iconCache = new();
+
+    // Dalamud's own logo (UIRes/logo.png under its asset directory), used as the taskbar icon for
+    // Dalamud core windows. Null until successfully resolved; resolution is retried on later ticks.
+    private byte[]? dalamudCoreIcon;
     private readonly ConcurrentDictionary<string, byte> pendingDownloads = new();
     private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
@@ -187,19 +191,8 @@ public class DalamudWindowTracker
             // Safe guard: accessing Service<T> where T != ServiceContainer triggers Service<T>..cctor
             // which calls Service<ServiceContainer>.Get() (blocking until ServiceContainer is provided).
             // Checking Service<ServiceContainer> first prevents deadlock outside the live game loop / in unit tests.
-            var scType = logAssembly.GetType("Dalamud.IoC.Internal.ServiceContainer");
-            if (scType != null)
-            {
-                var scService = serviceOpenType.MakeGenericType(scType);
-                var scTcsField = scService.GetField("instanceTcs", BindingFlags.NonPublic | BindingFlags.Static);
-                var scTcs = scTcsField?.GetValue(null);
-                if (scTcs != null)
-                {
-                    var scTaskProp = scTcs.GetType().GetProperty("Task");
-                    if (scTaskProp?.GetValue(scTcs) is not System.Threading.Tasks.Task scTask || !scTask.IsCompleted)
-                        return;
-                }
-            }
+            if (!IsServiceContainerReady(logAssembly, serviceOpenType))
+                return;
 
             var pmInstance = ResolveDalamudService(serviceOpenType, pmType);
             if (pmInstance == null) return;
@@ -262,7 +255,7 @@ public class DalamudWindowTracker
             {
                 var diInstance = ResolveDalamudService(serviceOpenType, diType);
                 if (diInstance != null)
-                    this.ScanDalamudCoreWindows(diInstance);
+                    this.ScanDalamudCoreWindows(diInstance, this.TryLoadDalamudCoreIcon(logAssembly, serviceOpenType));
             }
         }
         catch (Exception ex)
@@ -273,6 +266,27 @@ public class DalamudWindowTracker
             if (this.scanFailLogCounter++ % 30 == 0)
                 Logger.Warning($"[WindowManager] Plugin discovery scan failed via reflection: {ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// Confirms Dalamud's <c>Service&lt;ServiceContainer&gt;</c> singleton has been provided. Any
+    /// <c>Service&lt;T&gt;</c> access (for T != ServiceContainer) must be gated on this, because that
+    /// type's static constructor blocks on <c>Service&lt;ServiceContainer&gt;.Get()</c> and would deadlock
+    /// outside the live game loop / in unit tests. Returns <c>true</c> (proceed) when the reflection
+    /// surface is absent, matching the prior inline fall-through behavior.
+    /// </summary>
+    private static bool IsServiceContainerReady(Assembly logAssembly, Type serviceOpenType)
+    {
+        var scType = logAssembly.GetType("Dalamud.IoC.Internal.ServiceContainer");
+        if (scType == null) return true;
+
+        var scService = serviceOpenType.MakeGenericType(scType);
+        var scTcsField = scService.GetField("instanceTcs", BindingFlags.NonPublic | BindingFlags.Static);
+        var scTcs = scTcsField?.GetValue(null);
+        if (scTcs == null) return true;
+
+        var scTaskProp = scTcs.GetType().GetProperty("Task");
+        return scTaskProp?.GetValue(scTcs) is Task scTask && scTask.IsCompleted;
     }
 
     /// <summary>
@@ -302,8 +316,11 @@ public class DalamudWindowTracker
     /// Dalamud-namespace traversal skip in <c>ShouldTraverseType</c> applies (issue #36).
     /// </summary>
     internal void ScanDalamudCoreWindows(object dalamudInterface)
+        => this.ScanDalamudCoreWindows(dalamudInterface, this.TryLoadDalamudCoreIcon());
+
+    internal void ScanDalamudCoreWindows(object dalamudInterface, byte[]? coreIcon)
     {
-        this.currentPluginContext = new PluginContext("Dalamud", null);
+        this.currentPluginContext = new PluginContext("Dalamud", coreIcon);
         try
         {
             this.ScanObjectForWindowSystems(dalamudInterface);
@@ -312,6 +329,59 @@ public class DalamudWindowTracker
         {
             this.currentPluginContext = null;
         }
+    }
+
+    /// <summary>
+    /// Resolves Dalamud's own logo (<c>UIRes/logo.png</c> under <c>Dalamud.AssetDirectory</c>) for use as
+    /// the taskbar icon of Dalamud core windows, which carry no owning plugin and would otherwise fall back
+    /// to a text monogram. Best-effort and cached: returns <c>null</c> until the Dalamud service and asset
+    /// file are available, retries on later ticks, and caches the bytes once loaded. Gated on
+    /// <see cref="IsServiceContainerReady"/> so it is safe to call outside the live game loop.
+    /// </summary>
+    internal byte[]? TryLoadDalamudCoreIcon()
+    {
+        var logAssembly = typeof(Dalamud.Plugin.Services.IPluginLog).Assembly;
+        var serviceOpenType = logAssembly.GetType("Dalamud.Service`1");
+        return serviceOpenType == null ? null : this.TryLoadDalamudCoreIcon(logAssembly, serviceOpenType);
+    }
+
+    private byte[]? TryLoadDalamudCoreIcon(Assembly logAssembly, Type serviceOpenType)
+    {
+        if (this.dalamudCoreIcon != null)
+            return this.dalamudCoreIcon;
+
+        try
+        {
+            if (!IsServiceContainerReady(logAssembly, serviceOpenType))
+                return null;
+
+            var dalamudType = logAssembly.GetType("Dalamud.Dalamud");
+            if (dalamudType == null) return null;
+
+            var dalamud = ResolveDalamudService(serviceOpenType, dalamudType);
+            if (dalamud == null) return null;
+
+            // Dalamud.AssetDirectory (DirectoryInfo, non-public getter) points at the active
+            // dalamudAssets/<branch> folder; the logo lives at UIRes/logo.png beneath it.
+            var assetDir = dalamudType
+                .GetProperty("AssetDirectory", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                ?.GetValue(dalamud) as DirectoryInfo;
+            var dir = assetDir?.FullName;
+            if (string.IsNullOrEmpty(dir)) return null;
+
+            var logoPath = Path.Combine(dir, "UIRes", "logo.png");
+            if (File.Exists(logoPath))
+            {
+                this.dalamudCoreIcon = File.ReadAllBytes(logoPath);
+                return this.dalamudCoreIcon;
+            }
+        }
+        catch
+        {
+            // Best-effort: Dalamud core windows fall back to a monogram if the logo cannot be resolved.
+        }
+
+        return null;
     }
 
     /// <summary>
