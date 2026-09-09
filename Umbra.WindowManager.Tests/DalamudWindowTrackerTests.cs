@@ -322,6 +322,121 @@ public class DalamudWindowTrackerTests
         Assert.True(tw.IsMinimized);
     }
 
+    private class FakeManifest
+    {
+        public string? InternalName { get; set; }
+        public string? IconUrl { get; set; }
+        public string? Dip17Channel { get; set; }
+    }
+
+    private class FakeLocalPlugin
+    {
+        public FakeManifest? Manifest { get; set; }
+        public System.IO.FileInfo? DllFile { get; set; }
+    }
+
+    [Fact]
+    public void ResolveIconUrl_PrefersManifestIconUrl()
+    {
+        var url = DalamudWindowTracker.ResolveIconUrl("https://example.com/a.png", "https://other/b.png", "stable", "MyPlugin");
+        Assert.Equal("https://example.com/a.png", url);
+    }
+
+    [Fact]
+    public void ResolveIconUrl_FallsBackToAvailableIconUrl_WhenManifestEmpty()
+    {
+        var url = DalamudWindowTracker.ResolveIconUrl(null, "https://other/b.png", "stable", "MyPlugin");
+        Assert.Equal("https://other/b.png", url);
+    }
+
+    [Fact]
+    public void ResolveIconUrl_SynthesizesDip17Url_ForMainRepoPluginsWithoutStaticIcon()
+    {
+        // Issue #37: main-repo (DIP17) plugins carry no static IconUrl; Dalamud itself derives the icon
+        // URL from the plugin's Dip17Channel. Mirror that so those plugins show real icons, not monograms.
+        var url = DalamudWindowTracker.ResolveIconUrl(null, null, "stable", "SamplePlugin");
+        Assert.Equal("https://raw.githubusercontent.com/goatcorp/PluginDistD17/main/stable/SamplePlugin/images/icon.png", url);
+    }
+
+    [Fact]
+    public void ResolveIconUrl_ReturnsNull_WhenNoStaticUrlAndNoChannel()
+    {
+        Assert.Null(DalamudWindowTracker.ResolveIconUrl(null, null, null, "SamplePlugin"));
+    }
+
+    [Fact]
+    public void ResolvePluginContext_DoesNotNegativeCache_WhenIconUnresolvedAtScanTime()
+    {
+        // Issue #37: when the icon can't be resolved yet (plugin metadata/network not ready at the first
+        // scan tick), the null result must NOT be cached permanently. A later tick, once the icon is
+        // available on disk, must be able to pick it up instead of being blocked by a stale null entry.
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var name = "LateIconPlugin_" + System.Guid.NewGuid().ToString("N");
+        var tempDir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), name);
+        System.IO.Directory.CreateDirectory(tempDir);
+
+        var fakePlugin = new FakeLocalPlugin
+        {
+            Manifest = new FakeManifest { InternalName = name, IconUrl = null, Dip17Channel = null },
+            DllFile = new System.IO.FileInfo(System.IO.Path.Combine(tempDir, "plugin.dll")),
+        };
+
+        var cachedPath = DalamudWindowTracker.GetCachedIconPath(name);
+        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(cachedPath)!);
+
+        try
+        {
+            // First scan: nothing on disk, no URL to synthesize -> icon unresolved.
+            var first = tracker.ResolvePluginContext(fakePlugin);
+            Assert.Null(first.IconBytes);
+
+            // Icon becomes available on disk (e.g. Dalamud finished downloading/caching it).
+            var bytes = new byte[] { 0x89, 0x50, 0x4E, 0x47 };
+            System.IO.File.WriteAllBytes(cachedPath, bytes);
+
+            // Second scan must re-resolve rather than return a permanently cached null.
+            var second = tracker.ResolvePluginContext(fakePlugin);
+            Assert.Equal(bytes, second.IconBytes);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(cachedPath)) System.IO.File.Delete(cachedPath);
+            try { System.IO.Directory.Delete(tempDir, true); } catch { /* best effort cleanup */ }
+        }
+    }
+
+    [Fact]
+    public void ApplyDownloadedIcon_PropagatesToKnownWindowSystem_SoLaterWindowsGetIcon()
+    {
+        // Issue #37 (race): once an icon is downloaded in the background, a window opened afterwards must
+        // still receive it. That requires refreshing the cached plugin context on known window systems,
+        // not just the windows tracked at download time.
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("IconRaceSys");
+        var initialWin = new DummyWindow("InitialIconWin");
+        ws.AddWindow(initialWin);
+        tracker.TrackWindowSystem(ws, "RacePlugin", null); // icon not downloaded yet
+
+        var iconBytes = new byte[] { 9, 8, 7 };
+        tracker.ApplyDownloadedIcon("RacePlugin", iconBytes);
+
+        // The window tracked at download time receives the icon.
+        var initTw = service.GetTrackedWindows().Single(t => t.WindowName == "InitialIconWin");
+        Assert.Same(iconBytes, initTw.IconBytes);
+
+        // A window added AFTER the download must also receive it via the fast-path scan.
+        var lateWin = new DummyWindow("LateIconWin");
+        ws.AddWindow(lateWin);
+        tracker.ScanKnownWindowSystems();
+
+        var lateTw = service.GetTrackedWindows().Single(t => t.WindowName == "LateIconWin");
+        Assert.Same(iconBytes, lateTw.IconBytes);
+    }
+
     [Fact]
     public void LoadPluginIcon_LoadsFromDiskCacheIfExists()
     {

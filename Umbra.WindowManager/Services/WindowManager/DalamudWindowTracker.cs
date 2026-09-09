@@ -283,19 +283,33 @@ public class DalamudWindowTracker
             var lpType = localPlugin.GetType();
             manifest ??= lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
             var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string;
-            var iconUrl = manifest?.GetType().GetProperty("IconUrl")?.GetValue(manifest) as string;
-            if (string.IsNullOrWhiteSpace(iconUrl) && !string.IsNullOrEmpty(internalName) && availableIconUrls != null)
-            {
-                availableIconUrls.TryGetValue(internalName, out iconUrl);
-            }
+            var manifestIconUrl = manifest?.GetType().GetProperty("IconUrl")?.GetValue(manifest) as string;
+            var dip17Channel = manifest?.GetType().GetProperty("Dip17Channel")?.GetValue(manifest) as string;
+
+            string? availableIconUrl = null;
+            if (!string.IsNullOrEmpty(internalName) && availableIconUrls != null)
+                availableIconUrls.TryGetValue(internalName, out availableIconUrl);
+
+            var iconUrl = ResolveIconUrl(manifestIconUrl, availableIconUrl, dip17Channel, internalName);
 
             byte[]? icon = null;
             if (!string.IsNullOrEmpty(internalName))
             {
-                if (!this.iconCache.TryGetValue(internalName, out icon))
+                if (this.iconCache.TryGetValue(internalName, out icon))
+                {
+                    // Cached value present (bytes = resolved icon; null = the background download reported
+                    // a definitive miss). Either way, this is the final answer -- reuse it.
+                }
+                else
                 {
                     icon = this.LoadPluginIcon(localPlugin, internalName, iconUrl);
-                    this.iconCache[internalName] = icon;
+
+                    // Only cache a positive hit. A null here means "not resolvable yet" (metadata/network
+                    // not ready, or a download is in flight): caching it would permanently mask the icon
+                    // (issue #37). Re-evaluate on the next tick until the download callback records the
+                    // definitive result.
+                    if (icon != null)
+                        this.iconCache[internalName] = icon;
                 }
             }
 
@@ -304,6 +318,57 @@ public class DalamudWindowTracker
         catch
         {
             return new PluginContext(null, null);
+        }
+    }
+
+    // Dalamud's dynamic icon URL for main-repo (DIP17) plugins, which ship no static IconUrl. Mirrors
+    // PluginImageCache.MainRepoDip17ImageUrl: args are {channel}, {internalName}, {filename} (issue #37).
+    private const string Dip17IconUrlTemplate = "https://raw.githubusercontent.com/goatcorp/PluginDistD17/main/{0}/{1}/images/{2}";
+
+    /// <summary>
+    /// Resolves the icon URL for a plugin the way Dalamud itself does: a static manifest/remote IconUrl
+    /// when present, otherwise the DIP17 dynamic URL synthesized from the plugin's <c>Dip17Channel</c>
+    /// (main-repo plugins carry no static IconUrl). Returns null when no icon URL can be determined.
+    /// </summary>
+    internal static string? ResolveIconUrl(string? manifestIconUrl, string? availableIconUrl, string? dip17Channel, string? internalName)
+    {
+        if (!string.IsNullOrWhiteSpace(manifestIconUrl))
+            return manifestIconUrl;
+
+        if (!string.IsNullOrWhiteSpace(availableIconUrl))
+            return availableIconUrl;
+
+        if (!string.IsNullOrWhiteSpace(dip17Channel) && !string.IsNullOrEmpty(internalName))
+            return string.Format(Dip17IconUrlTemplate, dip17Channel, internalName, "icon.png");
+
+        return null;
+    }
+
+    /// <summary>
+    /// Applies a freshly resolved plugin icon to every place a later-opened window can pick it up:
+    /// currently tracked windows, and the cached plugin context on known window systems (so the 250ms
+    /// fast-path scan and <see cref="TryFastTrackWindow"/> hand the icon to windows opened after the
+    /// download completed, closing the background-download race in issue #37).
+    /// </summary>
+    internal void ApplyDownloadedIcon(string internalName, byte[] bytes)
+    {
+        this.iconCache[internalName] = bytes;
+
+        foreach (var ws in this.knownWindowSystems.Keys)
+        {
+            if (this.knownWindowSystems.TryGetValue(ws, out var context) &&
+                context.InternalName == internalName && context.IconBytes == null)
+            {
+                this.knownWindowSystems[ws] = context with { IconBytes = bytes };
+            }
+        }
+
+        var trackedWindows = this.windowManagerService.GetTrackedWindows();
+        for (var i = 0; i < trackedWindows.Count; i++)
+        {
+            var tw = trackedWindows[i];
+            if (tw.PluginInternalName == internalName)
+                tw.IconBytes = bytes;
         }
     }
 
@@ -362,7 +427,17 @@ public class DalamudWindowTracker
         {
             try
             {
-                var bytes = await HttpClient.GetByteArrayAsync(url).ConfigureAwait(false);
+                using var response = await HttpClient.GetAsync(url).ConfigureAwait(false);
+                if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                {
+                    // Definitive miss (e.g. synthesized DIP17 URL for a plugin that has no icon). Cache the
+                    // null so we stop re-requesting it every tick; the widget falls back to a monogram.
+                    this.iconCache[internalName] = null;
+                    return;
+                }
+
+                response.EnsureSuccessStatusCode();
+                var bytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
                 if (bytes is { Length: > 0 })
                 {
                     try
@@ -377,20 +452,13 @@ public class DalamudWindowTracker
                         // Disk cache write failure should not prevent runtime icon usage
                     }
 
-                    this.iconCache[internalName] = bytes;
-
-                    var trackedWindows = this.windowManagerService.GetTrackedWindows();
-                    for (var i = 0; i < trackedWindows.Count; i++)
-                    {
-                        var tw = trackedWindows[i];
-                        if (tw.PluginInternalName == internalName)
-                            tw.IconBytes = bytes;
-                    }
+                    this.ApplyDownloadedIcon(internalName, bytes);
                 }
             }
             catch
             {
-                // Network download failure; fallback to monogram
+                // Transient failure (timeout, DNS, connectivity, non-404 error). Do NOT cache a null:
+                // leaving the entry unset lets a later tick retry once the network settles (issue #37).
             }
             finally
             {
