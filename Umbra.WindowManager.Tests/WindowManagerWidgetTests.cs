@@ -65,7 +65,7 @@ public class WindowManagerWidgetTests
         // Button is [icon][label]; the clean title lives on the label child (issue #5).
         Assert.Equal("T", btnNode.ChildNodes[0].NodeValue);       // monogram icon fallback
         Assert.Equal("TestWindow", btnNode.ChildNodes[1].NodeValue);
-        Assert.Equal("TestWindow", btnNode.Tooltip);
+        Assert.Equal("Left-Click: Focus\nRight-Click: Context Menu", btnNode.Tooltip);
         Assert.Equal(1.0f, btnNode.Style.Opacity);
         Assert.Contains("open", btnNode.ClassList);
         Assert.DoesNotContain("minimized", btnNode.ClassList);
@@ -84,7 +84,7 @@ public class WindowManagerWidgetTests
 
         Assert.Single(widget.Node.ChildNodes);
         var btnNode = widget.WindowNodes["MyTool##ToolId"];
-        Assert.Equal("MyTool [Minimized]", btnNode.Tooltip);
+        Assert.Equal("Left-Click: Restore\nRight-Click: Context Menu", btnNode.Tooltip);
         Assert.Contains("minimized", btnNode.ClassList);
         Assert.Equal(0.6f, btnNode.Style.Opacity);
     }
@@ -162,7 +162,7 @@ public class WindowManagerWidgetTests
         widget.UpdateButtons();
         Assert.False(node.ChildNodes[1].Style.IsVisible ?? true);
         Assert.Equal("D", node.ChildNodes[0].NodeValue);
-        Assert.Equal("DisplayModeWin", node.Tooltip);
+        Assert.Equal("Left-Click: Focus\nRight-Click: Context Menu", node.Tooltip);
     }
 
     [Fact]
@@ -1182,6 +1182,125 @@ public class WindowManagerWidgetTests
         Assert.False(widget.WindowNodes.ContainsKey("dock_solo"));
         // Still visually marked as part of a dock group.
         Assert.Contains("dock-group", widget.WindowNodes["Solo Tab"].ClassList);
+    }
+
+    [Fact]
+    public void UpdateButtons_AppliesFocusedTooltip_WhenWindowIsFocused()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("FocusedWin") { IsFocused = true, IsOpen = true };
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["FocusedWin"];
+        Assert.Equal("Left-Click: Minimize\nRight-Click: Context Menu", btnNode.Tooltip);
+    }
+
+    [Fact]
+    public void UpdateButtons_DockGroupWithTwoMembers_ShowsOnlyClickActionsInTooltip()
+    {
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Plugin A") { IsOpen = true };
+        var b = new DummyWindow("Plugin B") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        service.RegisterDockGroup("dock_g2_tip", "Plugin A", new[] { ta, tb });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        var groupNode = widget.WindowNodes["dock_g2_tip"];
+        Assert.Equal("Left-Click: Focus\nRight-Click: Context Menu", groupNode.Tooltip);
+    }
+
+    [Fact]
+    public void UpdateButtons_DockGroupWithThreeOrMoreMembers_ShowsDockedPluginsAndClickActions()
+    {
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Penumbra##id1") { IsOpen = true };
+        var b = new DummyWindow("Glamourer##id2") { IsOpen = true };
+        var c = new DummyWindow("SimpleHeals##id3") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        var tc = service.RegisterWindow(c);
+        service.RegisterDockGroup("dock_g3_tip", "Penumbra##id1", new[] { ta, tb, tc });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        var groupNode = widget.WindowNodes["dock_g3_tip"];
+        var expectedTooltip = "Docked Plugins:\n- Penumbra\n- Glamourer\n- SimpleHeals\n\nLeft-Click: Focus\nRight-Click: Context Menu";
+        Assert.Equal(expectedTooltip, groupNode.Tooltip);
+    }
+
+    [Fact]
+    public void UpdateButtons_DockGroupWithThreeMembers_Focused_ShowsMinimizeAction()
+    {
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Penumbra##id1") { IsOpen = true, IsFocused = true };
+        var b = new DummyWindow("Glamourer##id2") { IsOpen = true };
+        var c = new DummyWindow("SimpleHeals##id3") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        var tc = service.RegisterWindow(c);
+        service.RegisterDockGroup("dock_g3_foc", "Penumbra##id1", new[] { ta, tb, tc });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        var groupNode = widget.WindowNodes["dock_g3_foc"];
+        var expectedTooltip = "Docked Plugins:\n- Penumbra\n- Glamourer\n- SimpleHeals\n\nLeft-Click: Minimize\nRight-Click: Context Menu";
+        Assert.Equal(expectedTooltip, groupNode.Tooltip);
+    }
+
+    [Fact]
+    public void UpdateButtons_DockGroupWithThreeMembers_Minimized_ShowsRestoreAction()
+    {
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Penumbra##id1") { IsOpen = true };
+        var b = new DummyWindow("Glamourer##id2") { IsOpen = true };
+        var c = new DummyWindow("SimpleHeals##id3") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        var tc = service.RegisterWindow(c);
+        service.RegisterDockGroup("dock_g3_min", "Penumbra##id1", new[] { ta, tb, tc });
+        service.Minimize(ta);
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        var groupNode = widget.WindowNodes["dock_g3_min"];
+        var expectedTooltip = "Docked Plugins:\n- Penumbra\n- Glamourer\n- SimpleHeals\n\nLeft-Click: Restore\nRight-Click: Context Menu";
+        Assert.Equal(expectedTooltip, groupNode.Tooltip);
+    }
+
+    [Fact]
+    public void UpdateButtons_StandaloneMemberWithDockGroup_CountThreeOrMore_ShowsDockedPlugins()
+    {
+        // When GroupDockedTabs is false, individual button still belongs to dock group of 3+ members
+        var service = new WindowManagerService();
+        var a = new DummyWindow("Tab 1") { IsOpen = true };
+        var b = new DummyWindow("Tab 2") { IsOpen = true };
+        var c = new DummyWindow("Tab 3") { IsOpen = true };
+        var ta = service.RegisterWindow(a);
+        var tb = service.RegisterWindow(b);
+        var tc = service.RegisterWindow(c);
+        service.RegisterDockGroup("dock_ungrouped", "Tab 1", new[] { ta, tb, tc });
+
+        var widget = CreateWidget(service);
+        widget.GroupDockedTabs = false;
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+
+        var btnNode = widget.WindowNodes["Tab 1"];
+        var expectedTooltip = "Docked Plugins:\n- Tab 1\n- Tab 2\n- Tab 3\n\nLeft-Click: Focus\nRight-Click: Context Menu";
+        Assert.Equal(expectedTooltip, btnNode.Tooltip);
     }
 }
 

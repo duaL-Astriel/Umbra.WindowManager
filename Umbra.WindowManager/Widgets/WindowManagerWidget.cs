@@ -686,7 +686,13 @@ public class WindowManagerWidget : ToolbarWidget
 
         var title = window.DisplayTitle;
         btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
-        btnNode.Tooltip = $"{title}{(window.IsMinimized ? " [Minimized]" : "")}";
+
+        DockGroup? dockGroup = null;
+        if (window.DockGroupKey != null)
+            dockGroup = this.windowManager.GetDockGroup(window.DockGroupKey);
+
+        var isMinimized = window.IsMinimized || !window.IsOpen;
+        btnNode.Tooltip = BuildTabTooltip(isMinimized, window.IsFocused, dockGroup?.Members);
 
         ApplyIcon(btnNode.ChildNodes[0], window);
 
@@ -807,7 +813,7 @@ public class WindowManagerWidget : ToolbarWidget
 
         this.RefreshGroupMembers(node, group.ActiveWindowName);
 
-        node.Tooltip = BuildGroupTooltip(members, group.ActiveWindowName, allMinimized);
+        node.Tooltip = BuildTabTooltip(allMinimized, anyFocused, members);
     }
 
     private void RebuildGroupChildren(Node node, bool withLabels)
@@ -993,21 +999,18 @@ public class WindowManagerWidget : ToolbarWidget
         return $"{(withLabels ? 'L' : 'I')}|{activeName}|{names}";
     }
 
-    private static string BuildGroupTooltip(List<TrackedWindow> members, string activeName, bool minimized)
+    internal static string BuildTabTooltip(bool isMinimized, bool isFocused, IReadOnlyList<TrackedWindow>? dockedMembers = null)
     {
-        var activeTitle = members.Count > 0 ? members[0].DisplayTitle : string.Empty;
-        for (var i = 0; i < members.Count; i++)
+        var leftAction = isMinimized ? "Restore" : (isFocused ? "Minimize" : "Focus");
+        var actions = $"Left-Click: {leftAction}\nRight-Click: Context Menu";
+
+        if (dockedMembers is { Count: >= 3 })
         {
-            if (members[i].WindowName == activeName)
-            {
-                activeTitle = members[i].DisplayTitle;
-                break;
-            }
+            var pluginTitles = string.Join("\n", dockedMembers.Select(m => $"- {m.DisplayTitle}"));
+            return $"Docked Plugins:\n{pluginTitles}\n\n{actions}";
         }
 
-        var extra = members.Count - 1;
-        var text = extra > 0 ? $"{activeTitle} (+{extra})" : activeTitle;
-        return minimized ? $"{text} [Minimized]" : text;
+        return actions;
     }
 
     private static void ApplyIcon(Node iconNode, TrackedWindow window)
