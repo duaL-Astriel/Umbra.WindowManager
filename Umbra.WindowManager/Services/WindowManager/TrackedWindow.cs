@@ -105,8 +105,12 @@ public class TrackedWindow
             if (!this.IsMinimized && !this.HasConfirmedUi) return false;
             if (w.Size.HasValue && (w.Size.Value.X <= 0 || w.Size.Value.Y <= 0))
                 return false;
-            if (w.SizeConstraints.HasValue && (w.SizeConstraints.Value.MaximumSize.X <= 0 || w.SizeConstraints.Value.MaximumSize.Y <= 0))
-                return false;
+            // NOTE: a zero MaximumSize is Dalamud/ImGui's "no maximum constraint" sentinel, not a
+            // zero-sized window -- windows that set only a MinimumSize (e.g. the Dalamud Plugin Installer,
+            // 830x570) leave MaximumSize at (0,0) and must still be managed (issue #36). Degenerate windows
+            // are already excluded by the actual-Size check above and by HasConfirmedUi (the
+            // ImGuiContextMonitor only confirms UI when the window draws with positive dimensions), so no
+            // MaximumSize guard is needed here.
             if (w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
                 w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration) ||
                 w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs) ||

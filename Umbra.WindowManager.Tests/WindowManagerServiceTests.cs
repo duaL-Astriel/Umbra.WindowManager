@@ -588,16 +588,40 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
-    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesZeroMaxConstraintsWindows()
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_RetainsWindowsWithZeroMaxConstraint()
     {
+        // A zero MaximumSize is Dalamud/ImGui's "no maximum constraint" sentinel, NOT a zero-sized window.
+        // The Dalamud Plugin Installer (830x570, interactive) sets exactly this and must still be managed
+        // (issue #36). Genuinely zero-sized windows are excluded by the actual-Size / HasConfirmedUi checks.
         var service = new WindowManagerService();
-        var win = new DummyWindow("ZeroConstraints Window")
+        var win = new DummyWindow("Plugin Installer###XlPluginInstaller")
         {
             IsOpen = true,
             SizeConstraints = new WindowSizeConstraints
             {
+                MinimumSize = new System.Numerics.Vector2(830, 570),
                 MaximumSize = System.Numerics.Vector2.Zero
             }
+        };
+
+        var tw = service.RegisterWindow(win);
+
+        Assert.True(tw.IsManageable);
+
+        var visible = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(tw, visible);
+    }
+
+    [Fact]
+    public void WindowManagerService_GetVisibleAndMinimizedWindows_ExcludesZeroActualSizeWindows()
+    {
+        // Distinct from an unconstrained (zero-max) window: a window whose *actual* Size is zero is
+        // degenerate and must still be excluded.
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Zero Size Window")
+        {
+            IsOpen = true,
+            Size = System.Numerics.Vector2.Zero
         };
 
         var tw = service.RegisterWindow(win);

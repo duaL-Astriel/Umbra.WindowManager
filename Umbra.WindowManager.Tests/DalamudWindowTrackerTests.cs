@@ -190,6 +190,74 @@ public class DalamudWindowTrackerTests
         Assert.Null(ex);
     }
 
+    // Mirrors Dalamud.Interface.Internal.DalamudInterface, which owns the core window system
+    // (Plugin Installer, Settings, Console, ...) in a private WindowSystem field rather than
+    // exposing it through PluginManager.InstalledPlugins (issue #36 part 1).
+    private class MockDalamudInterface
+    {
+        private readonly WindowSystem windowSystem;
+
+        public MockDalamudInterface(WindowSystem ws)
+        {
+            this.windowSystem = ws;
+        }
+    }
+
+    [Fact]
+    public void ScanDalamudCoreWindows_RegistersCoreWindowsUnderDalamudContext()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var coreWs = new WindowSystem("DalamudCore");
+        var installer = new DummyWindow("Plugin Installer###XlPluginInstaller");
+        var console = new DummyWindow("Dalamud Console###XlLog");
+        coreWs.AddWindow(installer);
+        coreWs.AddWindow(console);
+
+        var dalamudInterface = new MockDalamudInterface(coreWs);
+
+        tracker.ScanDalamudCoreWindows(dalamudInterface);
+
+        var tracked = service.GetTrackedWindows();
+        var installerTw = tracked.Single(t => t.WindowName == "Plugin Installer###XlPluginInstaller");
+        var consoleTw = tracked.Single(t => t.WindowName == "Dalamud Console###XlLog");
+
+        Assert.Equal("Dalamud", installerTw.PluginInternalName);
+        Assert.Equal("Dalamud", consoleTw.PluginInternalName);
+        Assert.Single(installer.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, installer.TitleBarButtons.First().Icon);
+    }
+
+    [Fact]
+    public void ScanDalamudCoreWindows_AppliesDalamudLogoIconToCoreWindows()
+    {
+        // Dalamud's own core windows (Plugin Installer, Settings, ...) carry no owning LocalPlugin and thus
+        // no plugin icon, so they must be tagged with Dalamud's own logo instead of falling back to a
+        // text monogram in the taskbar.
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var coreWs = new WindowSystem("DalamudCore");
+        var installer = new DummyWindow("Plugin Installer###XlPluginInstaller");
+        var settings = new DummyWindow("Dalamud Settings###XlSettings2");
+        coreWs.AddWindow(installer);
+        coreWs.AddWindow(settings);
+
+        var dalamudInterface = new MockDalamudInterface(coreWs);
+        var logoBytes = new byte[] { 0x89, 0x50, 0x4E, 0x47 }; // stand-in for UIRes/logo.png
+
+        tracker.ScanDalamudCoreWindows(dalamudInterface, logoBytes);
+
+        var tracked = service.GetTrackedWindows();
+        var installerTw = tracked.Single(t => t.WindowName == "Plugin Installer###XlPluginInstaller");
+        var settingsTw = tracked.Single(t => t.WindowName == "Dalamud Settings###XlSettings2");
+
+        Assert.Equal("Dalamud", installerTw.PluginInternalName);
+        Assert.Same(logoBytes, installerTw.IconBytes);
+        Assert.Same(logoBytes, settingsTw.IconBytes);
+    }
+
     private class PluginWithWindowSystems
     {
         public WindowSystem SysProp { get; set; }
