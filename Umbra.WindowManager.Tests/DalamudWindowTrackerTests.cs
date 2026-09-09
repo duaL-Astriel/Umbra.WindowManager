@@ -190,6 +190,45 @@ public class DalamudWindowTrackerTests
         Assert.Null(ex);
     }
 
+    // Mirrors Dalamud.Interface.Internal.DalamudInterface, which owns the core window system
+    // (Plugin Installer, Settings, Console, ...) in a private WindowSystem field rather than
+    // exposing it through PluginManager.InstalledPlugins (issue #36 part 1).
+    private class MockDalamudInterface
+    {
+        private readonly WindowSystem windowSystem;
+
+        public MockDalamudInterface(WindowSystem ws)
+        {
+            this.windowSystem = ws;
+        }
+    }
+
+    [Fact]
+    public void ScanDalamudCoreWindows_RegistersCoreWindowsUnderDalamudContext()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var coreWs = new WindowSystem("DalamudCore");
+        var installer = new DummyWindow("Plugin Installer###XlPluginInstaller");
+        var console = new DummyWindow("Dalamud Console###XlLog");
+        coreWs.AddWindow(installer);
+        coreWs.AddWindow(console);
+
+        var dalamudInterface = new MockDalamudInterface(coreWs);
+
+        tracker.ScanDalamudCoreWindows(dalamudInterface);
+
+        var tracked = service.GetTrackedWindows();
+        var installerTw = tracked.Single(t => t.WindowName == "Plugin Installer###XlPluginInstaller");
+        var consoleTw = tracked.Single(t => t.WindowName == "Dalamud Console###XlLog");
+
+        Assert.Equal("Dalamud", installerTw.PluginInternalName);
+        Assert.Equal("Dalamud", consoleTw.PluginInternalName);
+        Assert.Single(installer.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, installer.TitleBarButtons.First().Icon);
+    }
+
     private class PluginWithWindowSystems
     {
         public WindowSystem SysProp { get; set; }
