@@ -122,6 +122,7 @@ public class WindowManagerWidget : ToolbarWidget
     private bool groupDockedTabs = true;
     private bool decorate = true;
     private string blacklist = "";
+    private bool trackRawImGui;
     private string? lastFocusedWindowName;
     private long lastFocusedTick;
 
@@ -158,6 +159,8 @@ public class WindowManagerWidget : ToolbarWidget
                 this.blacklist = bls;
             else if (configValues.TryGetValue("Blacklist", out var bld) && bld is string blds)
                 this.blacklist = blds;
+            if (configValues.TryGetValue("WindowManager.TrackRawImGuiWindows", out var tri) && tri is bool trib)
+                this.trackRawImGui = trib;
         }
 
         this.rootNode = new Node
@@ -260,6 +263,20 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
+    [ConfigVariable("WindowManager.TrackRawImGuiWindows", "General", "Window Manager")]
+    public bool TrackRawImGui
+    {
+        get => this.HasConfigVariable("WindowManager.TrackRawImGuiWindows")
+            ? this.GetConfigValue<bool>("WindowManager.TrackRawImGuiWindows")
+            : this.trackRawImGui;
+        set
+        {
+            this.trackRawImGui = value;
+            if (this.HasConfigVariable("WindowManager.TrackRawImGuiWindows"))
+                this.SetConfigValue("WindowManager.TrackRawImGuiWindows", value);
+        }
+    }
+
     protected override void Initialize()
     {
     }
@@ -329,6 +346,18 @@ public class WindowManagerWidget : ToolbarWidget
             {
                 Category = "General",
                 Group = "Window Manager"
+            },
+            new BooleanWidgetConfigVariable(
+                "WindowManager.TrackRawImGuiWindows",
+                "Track raw ImGui windows (experimental)",
+                "Also list plugin windows that don't use Dalamud's window system (e.g. Sonar). "
+                + "Minimize is best-effort: the window is moved off-screen while hidden, and some plugins "
+                + "may fight it. Off by default.",
+                false
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
             }
         ];
     }
@@ -376,6 +405,7 @@ public class WindowManagerWidget : ToolbarWidget
     public void UpdateButtons()
     {
         this.rootNode.ToggleClass("decorated", this.Decorate);
+        this.windowManager.RawTrackingEnabled = this.TrackRawImGui;
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
 
         var blacklistSet = this.GetParsedBlacklist();
@@ -692,7 +722,7 @@ public class WindowManagerWidget : ToolbarWidget
             dockGroup = this.windowManager.GetDockGroup(window.DockGroupKey);
 
         var isMinimized = window.IsMinimized || !window.IsOpen;
-        btnNode.Tooltip = BuildTabTooltip(isMinimized, window.IsFocused, dockGroup?.Members);
+        btnNode.Tooltip = BuildTabTooltip(isMinimized, window.IsFocused, dockGroup?.Members, window.IsRawImGui);
 
         ApplyIcon(btnNode.ChildNodes[0], window);
 
@@ -999,10 +1029,13 @@ public class WindowManagerWidget : ToolbarWidget
         return $"{(withLabels ? 'L' : 'I')}|{activeName}|{names}";
     }
 
-    internal static string BuildTabTooltip(bool isMinimized, bool isFocused, IReadOnlyList<TrackedWindow>? dockedMembers = null)
+    internal static string BuildTabTooltip(bool isMinimized, bool isFocused, IReadOnlyList<TrackedWindow>? dockedMembers = null, bool isRawImGui = false)
     {
         var leftAction = isMinimized ? "Restore" : (isFocused ? "Minimize" : "Focus");
         var actions = $"Left-Click: {leftAction}\nRight-Click: Context Menu";
+
+        if (isRawImGui)
+            actions += "\n\nBest-effort (raw ImGui window)";
 
         if (dockedMembers is { Count: >= 3 })
         {

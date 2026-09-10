@@ -480,11 +480,12 @@ public class WindowManagerWidgetTests
         var vars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
 
         Assert.NotNull(vars);
-        Assert.Equal(5, vars.Count);
+        Assert.Equal(6, vars.Count);
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
         Assert.Contains(vars, v => v.Id == "WindowManager.Blacklist");
+        Assert.Contains(vars, v => v.Id == "WindowManager.TrackRawImGuiWindows");
         var decorateVar = vars.OfType<BooleanWidgetConfigVariable>().FirstOrDefault(v => v.Id == "WindowManager.Decorate");
         Assert.NotNull(decorateVar);
         Assert.Equal("General", decorateVar.Category);
@@ -1301,6 +1302,35 @@ public class WindowManagerWidgetTests
         var btnNode = widget.WindowNodes["Tab 1"];
         var expectedTooltip = "Docked Plugins:\n- Tab 1\n- Tab 2\n- Tab 3\n\nLeft-Click: Focus\nRight-Click: Context Menu";
         Assert.Equal(expectedTooltip, btnNode.Tooltip);
+    }
+
+    [Fact]
+    public void GetConfigVariables_IncludesTrackRawImGuiToggle_DefaultOff()
+    {
+        var widget = CreateWidget(new WindowManagerService());
+        var method = typeof(WindowManagerWidget).GetMethod(
+            "GetConfigVariables", BindingFlags.Instance | BindingFlags.NonPublic);
+        var vars = (method!.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
+
+        Assert.NotNull(vars);
+        var toggle = vars!.OfType<BooleanWidgetConfigVariable>()
+                          .FirstOrDefault(v => v.Id == "WindowManager.TrackRawImGuiWindows");
+        Assert.NotNull(toggle);
+        Assert.False(toggle!.DefaultValue); // opt-in: default OFF
+        Assert.Equal("General", toggle.Category);
+        Assert.Equal("Window Manager", toggle.Group);
+    }
+
+    [Fact]
+    public void BuildTabTooltip_RawImGuiWindow_NotesBestEffort()
+    {
+        var tip = WindowManagerWidget.BuildTabTooltip(
+            isMinimized: false, isFocused: false, dockedMembers: null, isRawImGui: true);
+        Assert.Contains("Best-effort", tip);
+
+        var normal = WindowManagerWidget.BuildTabTooltip(
+            isMinimized: false, isFocused: false, dockedMembers: null, isRawImGui: false);
+        Assert.DoesNotContain("Best-effort", normal);
     }
 }
 
