@@ -95,6 +95,21 @@ public class WindowManagerService
         this.windows.TryRemove(window.WindowName, out _);
     }
 
+    public void UnregisterWindowsForPlugin(string pluginInternalName)
+    {
+        if (string.IsNullOrWhiteSpace(pluginInternalName))
+            return;
+
+        foreach (var (key, tw) in this.windows)
+        {
+            if (string.Equals(tw.PluginInternalName, pluginInternalName, StringComparison.OrdinalIgnoreCase))
+            {
+                this.windows.TryRemove(key, out _);
+            }
+        }
+    }
+
+
     public void Minimize(TrackedWindow tracked)
     {
         if (tracked.DockGroupKey != null && this.dockGroups.TryGetValue(tracked.DockGroupKey, out var group))

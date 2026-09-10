@@ -15,7 +15,7 @@ using Umbra.Common;
 namespace Umbra.WindowManager.Services.WindowManager;
 
 [Service]
-public class DalamudWindowTracker
+public class DalamudWindowTracker : IDisposable
 {
     private readonly WindowManagerService windowManagerService;
 
@@ -43,7 +43,25 @@ public class DalamudWindowTracker
     // instead of every 2-second tick.
     private int scanFailLogCounter;
 
+    /// <summary>
+    /// Event fired whenever a plugin is reloaded, updated, or uninstalled, signalling observers
+    /// (such as <see cref="ImGuiContextMonitor"/>) to clear caches and re-evaluate windows.
+    /// </summary>
+    public event Action? PluginReloaded;
+
+    // Tracks the active plugin instance object (by weak reference) keyed by internal name.
+    // If the instance changes, the plugin was reloaded or updated.
+    private readonly ConcurrentDictionary<string, WeakReference<object>> knownPluginInstances = new(StringComparer.OrdinalIgnoreCase);
+
+    private object? hookedPluginManager;
+    private Delegate? onInstalledPluginsChangedHandler;
+    private object? hookedPluginInterface;
+    private Delegate? onActivePluginsChangedHandler;
+
+
+
     public DalamudWindowTracker(WindowManagerService windowManagerService)
+
     {
         this.windowManagerService = windowManagerService;
         this.ScanPlugins();
@@ -197,6 +215,9 @@ public class DalamudWindowTracker
             var pmInstance = ResolveDalamudService(serviceOpenType, pmType);
             if (pmInstance == null) return;
 
+            this.TryHookPluginManagerEvents(pmInstance);
+
+
             var installedProp = pmType.GetProperty("InstalledPlugins", BindingFlags.Public | BindingFlags.Instance);
             if (installedProp?.GetValue(pmInstance) is not IEnumerable installedPlugins) return;
 
@@ -223,28 +244,8 @@ public class DalamudWindowTracker
                 // Best effort
             }
 
-            foreach (var localPlugin in installedPlugins)
-            {
-                if (localPlugin == null) continue;
+            this.ScanInstalledPlugins(installedPlugins, availableIconUrls);
 
-                var manifest = localPlugin.GetType().GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
-                var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
-                if (isHide) continue;
-
-                var pluginInstanceField = localPlugin.GetType().GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
-                var pluginObj = pluginInstanceField?.GetValue(localPlugin);
-                if (pluginObj == null) continue;
-
-                this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
-                try
-                {
-                    this.ScanObjectForWindowSystems(pluginObj);
-                }
-                finally
-                {
-                    this.currentPluginContext = null;
-                }
-            }
 
             // Dalamud's own core windows (Plugin Installer, Settings, Console, Data, Changelog, ...) live
             // in DalamudInterface's private WindowSystem, not in PluginManager.InstalledPlugins, so they are
@@ -1055,5 +1056,238 @@ public class DalamudWindowTracker
         return null;
     }
 
+    /// <summary>
+    /// Removes all tracking state for the specified plugin: drops its known window systems from the
+    /// fast-track cache, unregisters its windows from <see cref="WindowManagerService"/>, and evicts its
+    /// cached icon so a newly updated or reloaded plugin can be cleanly discovered and registered.
+    /// </summary>
+    public void UntrackPlugin(string internalName)
+    {
+        if (string.IsNullOrWhiteSpace(internalName)) return;
+
+        foreach (var (ws, context) in this.knownWindowSystems)
+        {
+            if (string.Equals(context.InternalName, internalName, StringComparison.OrdinalIgnoreCase))
+            {
+                this.knownWindowSystems.TryRemove(ws, out _);
+            }
+        }
+
+        this.iconCache.TryRemove(internalName, out _);
+        this.knownPluginInstances.TryRemove(internalName, out _);
+        this.windowManagerService.UnregisterWindowsForPlugin(internalName);
+    }
+
+    /// <summary>
+    /// Scans a collection of installed plugins to discover window systems and windows, automatically
+    /// detecting plugin reloads, updates, or uninstalls and keeping window registrations up to date.
+    /// </summary>
+    internal void ScanInstalledPlugins(IEnumerable installedPlugins, IReadOnlyDictionary<string, string>? availableIconUrls)
+    {
+        var seenPlugins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var stateChanged = false;
+
+        foreach (var localPlugin in installedPlugins)
+        {
+            if (localPlugin == null) continue;
+
+            var lpType = localPlugin.GetType();
+            var manifest = lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
+            var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
+            if (isHide) continue;
+
+            var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string
+                            ?? lpType.GetProperty("InternalName", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin) as string;
+
+            var pluginInstanceField = lpType.GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
+            var pluginObj = pluginInstanceField?.GetValue(localPlugin);
+
+            if (!string.IsNullOrEmpty(internalName))
+            {
+                if (pluginObj == null)
+                {
+                    // Plugin is unloaded or disabled
+                    if (this.knownPluginInstances.TryRemove(internalName, out _))
+                    {
+                        this.UntrackPlugin(internalName);
+                        stateChanged = true;
+                    }
+                    continue;
+                }
+
+                seenPlugins.Add(internalName);
+
+                // Detect reload or instance replacement
+                if (this.knownPluginInstances.TryGetValue(internalName, out var oldObjRef))
+                {
+                    if (!oldObjRef.TryGetTarget(out var oldObj) || !ReferenceEquals(oldObj, pluginObj))
+                    {
+                        // Instance changed! Plugin reloaded or updated
+                        this.UntrackPlugin(internalName);
+                        this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                        stateChanged = true;
+                    }
+                }
+                else
+                {
+                    this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                }
+            }
+            else if (pluginObj == null)
+            {
+                continue;
+            }
+
+            var piProp = lpType.GetProperty("DalamudInterface", BindingFlags.Public | BindingFlags.Instance)
+                      ?? lpType.GetProperty("PluginInterface", BindingFlags.Public | BindingFlags.Instance);
+            var piInstance = piProp?.GetValue(localPlugin);
+            if (piInstance != null)
+            {
+                this.TryHookPluginInterfaceEvents(piInstance);
+            }
+
+            this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
+            try
+            {
+                this.ScanObjectForWindowSystems(pluginObj);
+            }
+            finally
+            {
+                this.currentPluginContext = null;
+            }
+        }
+
+        // Untrack any plugins that were uninstalled or removed from installedPlugins
+        foreach (var trackedName in this.knownPluginInstances.Keys)
+        {
+            if (!seenPlugins.Contains(trackedName))
+            {
+                this.UntrackPlugin(trackedName);
+                this.knownPluginInstances.TryRemove(trackedName, out _);
+                stateChanged = true;
+            }
+        }
+
+        if (stateChanged)
+        {
+            this.PluginReloaded?.Invoke();
+        }
+    }
+
+    internal void TryHookPluginManagerEvents(object pmInstance)
+    {
+        if (this.hookedPluginManager != null) return;
+
+        try
+        {
+            var pmType = pmInstance.GetType();
+            var installedEvent = pmType.GetEvent("OnInstalledPluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (installedEvent != null)
+            {
+                var actionMethod = typeof(DalamudWindowTracker).GetMethod(nameof(this.OnInstalledPluginsChanged), BindingFlags.NonPublic | BindingFlags.Instance);
+                if (actionMethod != null && installedEvent.EventHandlerType != null)
+                {
+                    var handler = Delegate.CreateDelegate(installedEvent.EventHandlerType, this, actionMethod);
+                    installedEvent.AddEventHandler(pmInstance, handler);
+                    this.onInstalledPluginsChangedHandler = handler;
+                    this.hookedPluginManager = pmInstance;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    internal void TryHookPluginInterfaceEvents(object piInstance)
+    {
+        if (this.hookedPluginInterface != null) return;
+
+        try
+        {
+            if (piInstance is Dalamud.Plugin.IDalamudPluginInterface dpi)
+            {
+                dpi.ActivePluginsChanged += this.OnActivePluginsChanged;
+                this.hookedPluginInterface = dpi;
+                return;
+            }
+
+            var piType = piInstance.GetType();
+            var activeEvent = piType.GetEvent("ActivePluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (activeEvent != null)
+            {
+                var actionMethod = typeof(DalamudWindowTracker).GetMethod(nameof(this.OnActivePluginsChanged), BindingFlags.NonPublic | BindingFlags.Instance);
+                if (actionMethod != null && activeEvent.EventHandlerType != null)
+                {
+                    var handler = Delegate.CreateDelegate(activeEvent.EventHandlerType, this, actionMethod);
+                    activeEvent.AddEventHandler(piInstance, handler);
+                    this.onActivePluginsChangedHandler = handler;
+                    this.hookedPluginInterface = piInstance;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    private void OnInstalledPluginsChanged()
+    {
+        this.ScanPlugins();
+    }
+
+    private void OnActivePluginsChanged(Dalamud.Plugin.IActivePluginsChangedEventArgs args)
+    {
+        this.ScanPlugins();
+    }
+
+    public void Dispose()
+    {
+        if (this.hookedPluginManager != null && this.onInstalledPluginsChangedHandler != null)
+        {
+            try
+            {
+                var pmType = this.hookedPluginManager.GetType();
+                var installedEvent = pmType.GetEvent("OnInstalledPluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                installedEvent?.RemoveEventHandler(this.hookedPluginManager, this.onInstalledPluginsChangedHandler);
+            }
+            catch
+            {
+                // Best effort
+            }
+            this.hookedPluginManager = null;
+            this.onInstalledPluginsChangedHandler = null;
+        }
+
+        if (this.hookedPluginInterface != null)
+        {
+            try
+            {
+                if (this.hookedPluginInterface is Dalamud.Plugin.IDalamudPluginInterface dpi)
+                {
+                    dpi.ActivePluginsChanged -= this.OnActivePluginsChanged;
+                }
+                else if (this.onActivePluginsChangedHandler != null)
+                {
+                    var piType = this.hookedPluginInterface.GetType();
+                    var activeEvent = piType.GetEvent("ActivePluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    activeEvent?.RemoveEventHandler(this.hookedPluginInterface, this.onActivePluginsChangedHandler);
+                }
+            }
+            catch
+            {
+                // Best effort
+            }
+            this.hookedPluginInterface = null;
+            this.onActivePluginsChangedHandler = null;
+        }
+    }
+
+
     internal sealed record PluginContext(string? InternalName, byte[]? IconBytes);
+
+
+
 }
