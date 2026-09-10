@@ -21,6 +21,10 @@ public class ImGuiContextMonitor
     private readonly HashSet<string> unmanagedWindowNames = [];
     private int unmanagedClearCounter;
 
+    // Where a soft-hidden raw window is parked. Far off any real viewport; re-applied every frame with
+    // ImGuiCond.Always so a cooperative plugin's own SetWindowPos is the only thing that can override it.
+    private static readonly System.Numerics.Vector2 OffScreenPos = new(-32000f, -32000f);
+
     public ImGuiContextMonitor(WindowManagerService windowManager, DalamudWindowTracker? windowTracker = null)
     {
         this.windowManager = windowManager;
@@ -59,10 +63,20 @@ public class ImGuiContextMonitor
         this.seenWindows.Clear();
         this.trackedMap.Clear();
         this.windowManager.GetTrackedWindows(this.trackedBuffer);
+        var rawEnabled = this.windowManager.RawTrackingEnabled;
         for (var i = 0; i < this.trackedBuffer.Count; i++)
         {
             var t = this.trackedBuffer[i];
             this.trackedMap[t.WindowName] = t;
+        }
+
+        if (!rawEnabled)
+        {
+            for (var i = 0; i < this.trackedBuffer.Count; i++)
+            {
+                if (this.trackedBuffer[i] is ImGuiTrackedWindow raw && raw.ResetOnDisable(out var restorePos))
+                    ImGui.SetWindowPos(raw.WindowName, restorePos, ImGuiCond.Always);
+            }
         }
 
         foreach (var list in this.dockGroups.Values)
@@ -92,6 +106,11 @@ public class ImGuiContextMonitor
                 if (tracked != null)
                 {
                     this.trackedMap[name] = tracked;
+                }
+                else if (rawEnabled && this.TryTrackRawWindow(win, name, out var rawTracked))
+                {
+                    this.trackedMap[name] = rawTracked;
+                    tracked = rawTracked;
                 }
                 else
                 {
@@ -128,6 +147,33 @@ public class ImGuiContextMonitor
             else if (!tracked.IsMinimized)
             {
                 tracked.HasConfirmedUi = false;
+            }
+
+            if (rawEnabled && tracked is ImGuiTrackedWindow rawWin)
+            {
+                rawWin.ObservedPos = win.Pos;
+                rawWin.ObservedSize = win.Size;
+                rawWin.HasTitleBar = (win.Flags & ImGuiWindowFlags.NoTitleBar) == 0;
+                rawWin.ObservedFocused = !ctx.NavWindow.IsNull &&
+                                         (IntPtr)ctx.NavWindow.Handle == (IntPtr)win.Handle;
+                rawWin.UnseenFrames = 0;
+
+                var action = rawWin.ComputeFrameAction(OffScreenPos);
+                switch (action.Kind)
+                {
+                    case RawFrameActionKind.HideOffScreen:
+                        ImGui.SetWindowPos(name, action.Position, ImGuiCond.Always);
+                        break;
+                    case RawFrameActionKind.Restore:
+                        ImGui.SetWindowPos(name, action.Position, ImGuiCond.Always);
+                        ImGui.SetWindowFocus(name);
+                        break;
+                    case RawFrameActionKind.Focus:
+                        ImGui.SetWindowFocus(name);
+                        break;
+                }
+
+                continue;
             }
 
             // Whether this window is currently docked into a (visible) node this frame. See IsWindowDocked:
@@ -223,6 +269,12 @@ public class ImGuiContextMonitor
             var t = this.trackedBuffer[i];
             if (this.seenWindows.Contains(t.WindowName))
                 continue;
+
+            if (t is ImGuiTrackedWindow)
+            {
+                t.UnseenFrames++;
+                continue;
+            }
 
             if (t.IsOpen && !t.IsMinimized)
             {
@@ -363,6 +415,27 @@ public class ImGuiContextMonitor
         {
             // Never let a dock-node tweak disrupt the draw loop.
         }
+    }
+
+    /// <summary>
+    /// Evaluates a <c>ctx.Windows</c> entry that has neither an <see cref="IWindow"/> nor a known
+    /// <see cref="Dalamud.Interface.Windowing.WindowSystem"/> against the strict raw-window classifier and,
+    /// on a pass, registers it as an <see cref="ImGuiTrackedWindow"/> (issue #38).
+    /// </summary>
+    private unsafe bool TryTrackRawWindow(Dalamud.Bindings.ImGui.ImGuiWindowPtr win, string name, out TrackedWindow tracked)
+    {
+        var cleanTitle = WindowInfoHelper.GetCleanTitle(name);
+        var hasContent = win.Appearing ||
+                         ValidateWindowContent(win.ContentSize, win.DrawList.IsNull ? 0 : win.DrawList.CmdBuffer.Size);
+
+        if (ImGuiWindowClassifier.ShouldTrack(win.Flags, win.Size, name, cleanTitle, hasContent))
+        {
+            tracked = this.windowManager.RegisterImGuiWindow(name);
+            return true;
+        }
+
+        tracked = null!;
+        return false;
     }
 
     private string GetDockKey(uint dockId)
