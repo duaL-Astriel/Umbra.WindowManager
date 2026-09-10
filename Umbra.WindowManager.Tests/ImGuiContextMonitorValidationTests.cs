@@ -81,4 +81,51 @@ public class ImGuiContextMonitorValidationTests
         Assert.True((once & Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize) != 0);
         Assert.Equal(once, twice);
     }
+
+    [Fact]
+    public void ClearUnmanagedCache_EmptiesUnmanagedWindowCache()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+
+        var unmanagedField = typeof(ImGuiContextMonitor).GetField(
+            "unmanagedWindowNames",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(unmanagedField);
+
+        var unmanagedSet = (System.Collections.Generic.HashSet<string>)unmanagedField.GetValue(monitor)!;
+        unmanagedSet.Add("StaleUnmanagedWindow");
+        Assert.Single(unmanagedSet);
+
+        monitor.ClearUnmanagedCache();
+        Assert.Empty(unmanagedSet);
+    }
+
+    [Fact]
+    public void ImGuiContextMonitor_SubscribesToPluginReloaded_AndClearsUnmanagedCache()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var monitor = new ImGuiContextMonitor(service, tracker);
+
+        var unmanagedField = typeof(ImGuiContextMonitor).GetField(
+            "unmanagedWindowNames",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(unmanagedField);
+
+        var unmanagedSet = (System.Collections.Generic.HashSet<string>)unmanagedField.GetValue(monitor)!;
+        unmanagedSet.Add("StaleUnmanagedWindow");
+        Assert.Single(unmanagedSet);
+
+        var reloadedEvent = typeof(DalamudWindowTracker).GetField(
+            "PluginReloaded",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        var action = (System.Action?)reloadedEvent?.GetValue(tracker);
+        Assert.NotNull(action);
+        action();
+
+        Assert.Empty(unmanagedSet);
+    }
 }
+
+

@@ -25,9 +25,24 @@ public class ImGuiContextMonitor
     {
         this.windowManager = windowManager;
         this.windowTracker = windowTracker;
+        if (this.windowTracker != null)
+        {
+            this.windowTracker.PluginReloaded += this.ClearUnmanagedCache;
+        }
+    }
+
+
+    /// <summary>
+    /// Clears the cache of unmanaged window names so newly opened or updated plugin windows are
+    /// immediately re-evaluated against known window systems without waiting for the periodic 60-frame cycle.
+    /// </summary>
+    public void ClearUnmanagedCache()
+    {
+        this.unmanagedWindowNames.Clear();
     }
 
     public static bool ValidateWindowDimensions(System.Numerics.Vector2 size) =>
+
         size.X > 0 && size.Y > 0;
 
     public static bool ValidateWindowContent(System.Numerics.Vector2 contentSize, int drawCmdCount) =>
