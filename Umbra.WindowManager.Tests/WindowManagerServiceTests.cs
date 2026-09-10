@@ -691,5 +691,56 @@ public class WindowManagerServiceTests
         Assert.True(tw.IsManageable);
         Assert.Contains(tw, service.GetVisibleAndMinimizedWindows());
     }
+
+    [Fact]
+    public void RegisterImGuiWindow_RegistersAndReturnsSameInstance()
+    {
+        var service = new WindowManagerService();
+
+        var first = service.RegisterImGuiWindow("Sonar##Main");
+        Assert.IsType<ImGuiTrackedWindow>(first);
+        Assert.Equal("Sonar", first.CleanTitle);
+
+        var second = service.RegisterImGuiWindow("Sonar##Main");
+        Assert.Same(first, second); // idempotent: same live instance
+    }
+
+    [Fact]
+    public void RawWindow_DroppedFromTracking_WhenUnseenPastThreshold()
+    {
+        var service = new WindowManagerService();
+        var raw = (ImGuiTrackedWindow)service.RegisterImGuiWindow("Ephemeral##x");
+        raw.ObservedSize = new System.Numerics.Vector2(300, 200);
+        raw.HasConfirmedUi = true;
+
+        Assert.Single(service.GetTrackedWindows());
+
+        // Plugin stopped drawing it: the monitor would age UnseenFrames past the threshold.
+        raw.UnseenFrames = ImGuiTrackedWindow.MaxUnseenRawFrames + 1;
+        Assert.Empty(service.GetTrackedWindows()); // pruned on read
+    }
+
+    [Fact]
+    public void RawWindow_MinimizeAndRestore_FlipFlags()
+    {
+        var service = new WindowManagerService();
+        var raw = (ImGuiTrackedWindow)service.RegisterImGuiWindow("Sonar##Main");
+        raw.ObservedSize = new System.Numerics.Vector2(300, 200);
+        raw.HasConfirmedUi = true;
+
+        service.Minimize(raw);
+        Assert.True(raw.IsMinimized);
+        Assert.False(raw.IsOpen);
+
+        service.Restore(raw);
+        Assert.False(raw.IsMinimized);
+        Assert.True(raw.IsOpen);
+    }
+
+    [Fact]
+    public void RawTrackingEnabled_DefaultsFalse()
+    {
+        Assert.False(new WindowManagerService().RawTrackingEnabled);
+    }
 }
 
