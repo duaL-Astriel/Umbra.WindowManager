@@ -119,6 +119,9 @@ public class ImGuiContextMonitor
                 }
             }
 
+            if (!rawEnabled && tracked is ImGuiTrackedWindow)
+                continue;   // feature off: don't observe/bookkeep a raw entry — let it age out via the Step-5 loop and be pruned (~0.5s)
+
             this.seenWindows.Add(name);
 
             // Validate window presence: dimensions, content, and visibility
