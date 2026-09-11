@@ -1,6 +1,7 @@
 // Umbra.WindowManager/Services/WindowManager/ImGuiContextMonitor.cs
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using Dalamud.Bindings.ImGui;
 using Umbra.Common;
 
@@ -60,6 +61,22 @@ public class ImGuiContextMonitor
     public static bool IsWindowDocked(uint dockId, bool dockNodeVisible) =>
         dockId != 0 && dockNodeVisible;
 
+    internal void PopulateTrackedMap()
+    {
+        this.trackedMap.Clear();
+        this.windowManager.GetTrackedWindows(this.trackedBuffer);
+        for (var i = 0; i < this.trackedBuffer.Count; i++)
+        {
+            var t = this.trackedBuffer[i];
+            this.trackedMap[t.WindowName] = t;
+            if (!string.IsNullOrEmpty(t.Id))
+                this.trackedMap[t.Id] = t;
+        }
+    }
+
+    internal bool TryGetTrackedWindow(string name, [NotNullWhen(true)] out TrackedWindow? tracked) =>
+        this.trackedMap.TryGetValue(name, out tracked);
+
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
     {
@@ -72,13 +89,7 @@ public class ImGuiContextMonitor
         }
 
         this.seenWindows.Clear();
-        this.trackedMap.Clear();
-        this.windowManager.GetTrackedWindows(this.trackedBuffer);
-        for (var i = 0; i < this.trackedBuffer.Count; i++)
-        {
-            var t = this.trackedBuffer[i];
-            this.trackedMap[t.WindowName] = t;
-        }
+        this.PopulateTrackedMap();
 
         foreach (var list in this.dockGroups.Values)
         {
