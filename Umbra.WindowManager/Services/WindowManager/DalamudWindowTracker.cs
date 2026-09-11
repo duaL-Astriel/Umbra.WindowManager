@@ -190,13 +190,34 @@ public class DalamudWindowTracker : IDisposable
     }
 
     private int isScanning;
+    private int scanPending;
 
     [OnTick(interval: 2000)]
     public void ScanPlugins()
     {
         if (System.Threading.Interlocked.CompareExchange(ref this.isScanning, 1, 0) != 0)
+        {
+            System.Threading.Interlocked.Exchange(ref this.scanPending, 1);
             return;
+        }
 
+        try
+        {
+            do
+            {
+                System.Threading.Interlocked.Exchange(ref this.scanPending, 0);
+                this.ScanPluginsCore();
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref this.scanPending, 0, 1) == 1);
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref this.isScanning, 0);
+        }
+    }
+
+    private void ScanPluginsCore()
+    {
         try
         {
             var logAssembly = typeof(Dalamud.Plugin.Services.IPluginLog).Assembly;
@@ -1087,10 +1108,25 @@ public class DalamudWindowTracker : IDisposable
         var seenPlugins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var stateChanged = false;
 
-        foreach (var localPlugin in installedPlugins)
+        var pluginsToScan = new List<object>();
+        if (installedPlugins is IList list)
         {
-            if (localPlugin == null) continue;
+            for (var i = 0; i < list.Count; i++)
+            {
+                var p = list[i];
+                if (p != null) pluginsToScan.Add(p);
+            }
+        }
+        else
+        {
+            foreach (var p in installedPlugins)
+            {
+                if (p != null) pluginsToScan.Add(p);
+            }
+        }
 
+        foreach (var localPlugin in pluginsToScan)
+        {
             var lpType = localPlugin.GetType();
             var manifest = lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
             var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
@@ -1106,6 +1142,17 @@ public class DalamudWindowTracker : IDisposable
             {
                 if (pluginObj == null)
                 {
+                    if (this.hookedPluginInterface != null)
+                    {
+                        var piCheckProp = lpType.GetProperty("DalamudInterface", BindingFlags.Public | BindingFlags.Instance)
+                                       ?? lpType.GetProperty("PluginInterface", BindingFlags.Public | BindingFlags.Instance);
+                        var piCheckInstance = piCheckProp?.GetValue(localPlugin);
+                        if (piCheckInstance != null && ReferenceEquals(this.hookedPluginInterface, piCheckInstance))
+                        {
+                            this.UnhookPluginInterface();
+                        }
+                    }
+
                     // Plugin is unloaded or disabled
                     if (this.knownPluginInstances.TryRemove(internalName, out _))
                     {
@@ -1131,6 +1178,7 @@ public class DalamudWindowTracker : IDisposable
                 else
                 {
                     this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                    stateChanged = true;
                 }
             }
             else if (pluginObj == null)
@@ -1143,7 +1191,14 @@ public class DalamudWindowTracker : IDisposable
             var piInstance = piProp?.GetValue(localPlugin);
             if (piInstance != null)
             {
-                this.TryHookPluginInterfaceEvents(piInstance);
+                if (string.Equals(internalName, "Umbra", StringComparison.OrdinalIgnoreCase))
+                {
+                    this.TryHookPreferredPluginInterfaceEvents(piInstance);
+                }
+                else
+                {
+                    this.TryHookPluginInterfaceEvents(piInstance);
+                }
             }
 
             this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
@@ -1202,10 +1257,26 @@ public class DalamudWindowTracker : IDisposable
 
     internal void TryHookPluginInterfaceEvents(object piInstance)
     {
-        if (this.hookedPluginInterface != null) return;
+        this.TryHookPluginInterfaceEventsInternal(piInstance, false);
+    }
+
+    internal void TryHookPreferredPluginInterfaceEvents(object piInstance)
+    {
+        this.TryHookPluginInterfaceEventsInternal(piInstance, true);
+    }
+
+    private void TryHookPluginInterfaceEventsInternal(object piInstance, bool isPreferred)
+    {
+        if (this.hookedPluginInterface != null && !isPreferred) return;
+        if (ReferenceEquals(this.hookedPluginInterface, piInstance)) return;
 
         try
         {
+            if (this.hookedPluginInterface != null && isPreferred)
+            {
+                this.UnhookPluginInterface();
+            }
+
             if (piInstance is Dalamud.Plugin.IDalamudPluginInterface dpi)
             {
                 dpi.ActivePluginsChanged += this.OnActivePluginsChanged;
@@ -1231,6 +1302,32 @@ public class DalamudWindowTracker : IDisposable
         {
             // Best effort
         }
+    }
+
+    private void UnhookPluginInterface()
+    {
+        if (this.hookedPluginInterface == null) return;
+
+        try
+        {
+            if (this.hookedPluginInterface is Dalamud.Plugin.IDalamudPluginInterface dpi)
+            {
+                dpi.ActivePluginsChanged -= this.OnActivePluginsChanged;
+            }
+            else if (this.onActivePluginsChangedHandler != null)
+            {
+                var piType = this.hookedPluginInterface.GetType();
+                var activeEvent = piType.GetEvent("ActivePluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                activeEvent?.RemoveEventHandler(this.hookedPluginInterface, this.onActivePluginsChangedHandler);
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+
+        this.hookedPluginInterface = null;
+        this.onActivePluginsChangedHandler = null;
     }
 
     private void OnInstalledPluginsChanged()
@@ -1261,28 +1358,7 @@ public class DalamudWindowTracker : IDisposable
             this.onInstalledPluginsChangedHandler = null;
         }
 
-        if (this.hookedPluginInterface != null)
-        {
-            try
-            {
-                if (this.hookedPluginInterface is Dalamud.Plugin.IDalamudPluginInterface dpi)
-                {
-                    dpi.ActivePluginsChanged -= this.OnActivePluginsChanged;
-                }
-                else if (this.onActivePluginsChangedHandler != null)
-                {
-                    var piType = this.hookedPluginInterface.GetType();
-                    var activeEvent = piType.GetEvent("ActivePluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    activeEvent?.RemoveEventHandler(this.hookedPluginInterface, this.onActivePluginsChangedHandler);
-                }
-            }
-            catch
-            {
-                // Best effort
-            }
-            this.hookedPluginInterface = null;
-            this.onActivePluginsChangedHandler = null;
-        }
+        this.UnhookPluginInterface();
     }
 
 

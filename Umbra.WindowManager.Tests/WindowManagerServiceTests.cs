@@ -158,6 +158,22 @@ public class WindowManagerServiceTests
         Assert.Equal("WinB1", remaining[0].WindowName);
     }
 
+    [Fact]
+    public void WindowManagerService_UnregisterWindowsForPlugin_RemovesFromDockGroups()
+    {
+        var service = new WindowManagerService();
+        var winA = new DummyWindow("WinA");
+        var twA = service.RegisterWindow(winA);
+        twA.PluginInternalName = "PluginA";
+
+        service.RegisterDockGroup("Group1", "WinA", new[] { twA });
+        Assert.NotNull(service.GetDockGroup("Group1"));
+
+        service.UnregisterWindowsForPlugin("PluginA");
+
+        Assert.Null(service.GetDockGroup("Group1"));
+    }
+
 
     [Fact]
     public void WindowManagerService_Close_ResetsMinimizedAndClosesWindow()
