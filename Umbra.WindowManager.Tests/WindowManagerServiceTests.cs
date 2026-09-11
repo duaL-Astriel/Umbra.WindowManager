@@ -133,6 +133,49 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void WindowManagerService_UnregisterWindowsForPlugin_RemovesOnlyMatchingWindows()
+    {
+        var service = new WindowManagerService();
+        var winA1 = new DummyWindow("WinA1");
+        var winA2 = new DummyWindow("WinA2");
+        var winB1 = new DummyWindow("WinB1");
+
+        var twA1 = service.RegisterWindow(winA1);
+        twA1.PluginInternalName = "PluginA";
+
+        var twA2 = service.RegisterWindow(winA2);
+        twA2.PluginInternalName = "PluginA";
+
+        var twB1 = service.RegisterWindow(winB1);
+        twB1.PluginInternalName = "PluginB";
+
+        Assert.Equal(3, service.GetTrackedWindows().Count);
+
+        service.UnregisterWindowsForPlugin("PluginA");
+
+        var remaining = service.GetTrackedWindows();
+        Assert.Single(remaining);
+        Assert.Equal("WinB1", remaining[0].WindowName);
+    }
+
+    [Fact]
+    public void WindowManagerService_UnregisterWindowsForPlugin_RemovesFromDockGroups()
+    {
+        var service = new WindowManagerService();
+        var winA = new DummyWindow("WinA");
+        var twA = service.RegisterWindow(winA);
+        twA.PluginInternalName = "PluginA";
+
+        service.RegisterDockGroup("Group1", "WinA", new[] { twA });
+        Assert.NotNull(service.GetDockGroup("Group1"));
+
+        service.UnregisterWindowsForPlugin("PluginA");
+
+        Assert.Null(service.GetDockGroup("Group1"));
+    }
+
+
+    [Fact]
     public void WindowManagerService_Close_ResetsMinimizedAndClosesWindow()
     {
         var service = new WindowManagerService();

@@ -190,6 +190,18 @@ public class DalamudWindowTrackerTests
         Assert.Null(ex);
     }
 
+    [Fact]
+    public void ScanPlugins_ResetsIsScanning_AfterCompletion()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var field = typeof(DalamudWindowTracker).GetField("isScanning", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(field);
+        var value = (int)field.GetValue(tracker)!;
+        Assert.Equal(0, value);
+    }
+
     // Mirrors Dalamud.Interface.Internal.DalamudInterface, which owns the core window system
     // (Plugin Installer, Settings, Console, ...) in a private WindowSystem field rather than
     // exposing it through PluginManager.InstalledPlugins (issue #36 part 1).
@@ -1138,4 +1150,357 @@ public class DalamudWindowTrackerTests
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "Penumbra.Gui.MainWindow");
     }
+
+    [Fact]
+    public void UntrackPlugin_RemovesKnownWindowSystems_UnregistersWindows_AndClearsIconCache()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var wsA = new WindowSystem("SysA");
+        var winA = new DummyWindow("WindowA");
+        wsA.AddWindow(winA);
+
+        var wsB = new WindowSystem("SysB");
+        var winB = new DummyWindow("WindowB");
+        wsB.AddWindow(winB);
+
+        var iconA = new byte[] { 1, 2, 3 };
+        var iconB = new byte[] { 4, 5, 6 };
+
+        tracker.TrackWindowSystem(wsA, "PluginA", iconA);
+        tracker.TrackWindowSystem(wsB, "PluginB", iconB);
+
+        Assert.Equal(2, service.GetTrackedWindows().Count);
+        Assert.NotNull(tracker.TryFastTrackWindow("WindowA"));
+        Assert.NotNull(tracker.TryFastTrackWindow("WindowB"));
+
+        // Untrack PluginA
+        tracker.UntrackPlugin("PluginA");
+
+        // WindowA should no longer be tracked in WindowManagerService
+        var tracked = service.GetTrackedWindows();
+        Assert.Single(tracked);
+        Assert.Equal("WindowB", tracked[0].WindowName);
+
+        // WindowA should no longer be fast-trackable from known window systems
+        Assert.Null(tracker.TryFastTrackWindow("WindowA"));
+        Assert.NotNull(tracker.TryFastTrackWindow("WindowB"));
+
+        // ScanKnownWindowSystems should not re-add WindowA
+        tracker.ScanKnownWindowSystems();
+        Assert.Single(service.GetTrackedWindows());
+    }
+
+    private class FakeLocalPluginWithInstance
+    {
+        public FakeManifest? Manifest { get; set; }
+        public System.IO.FileInfo? DllFile { get; set; }
+        internal object? instance;
+    }
+
+    private class PluginHost
+    {
+        public WindowSystem Sys { get; set; }
+        public PluginHost(WindowSystem ws) => Sys = ws;
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReloads_UntracksOldStateAndRegistersNewState()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws1 = new WindowSystem("Sys1");
+        var win1 = new DummyWindow("ReloadableWin");
+        ws1.AddWindow(win1);
+        var host1 = new PluginHost(ws1);
+
+        var plugin = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "HotReloadPlugin" },
+            instance = host1
+        };
+
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+        var tracked1 = service.GetTrackedWindows().Single(t => t.WindowName == "ReloadableWin");
+        Assert.True(tracked1.TryGetWindow(out var alive1) && ReferenceEquals(alive1, win1));
+        Assert.Single(win1.TitleBarButtons);
+
+        // Simulate plugin reload: new instance host2 with new window system and new window instance
+        var ws2 = new WindowSystem("Sys2");
+        var win2 = new DummyWindow("ReloadableWin");
+        ws2.AddWindow(win2);
+        var host2 = new PluginHost(ws2);
+        plugin.instance = host2;
+
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+        // WindowManager should now track win2 instead of win1
+        var tracked2 = service.GetTrackedWindows().Single(t => t.WindowName == "ReloadableWin");
+        Assert.True(tracked2.TryGetWindow(out var alive2) && ReferenceEquals(alive2, win2));
+        Assert.Single(win2.TitleBarButtons);
+
+        // Fast-tracking should resolve win2, not win1
+        var fastTracked = tracker.TryFastTrackWindow("ReloadableWin");
+        Assert.NotNull(fastTracked);
+        Assert.True(fastTracked.TryGetWindow(out var fastAlive) && ReferenceEquals(fastAlive, win2));
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginUninstalled_UntracksPluginWindows()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var wsA = new WindowSystem("SysA");
+        var winA = new DummyWindow("WinA");
+        wsA.AddWindow(winA);
+        var hostA = new PluginHost(wsA);
+
+        var wsB = new WindowSystem("SysB");
+        var winB = new DummyWindow("WinB");
+        wsB.AddWindow(winB);
+        var hostB = new PluginHost(wsB);
+
+        var pluginA = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "PluginA" },
+            instance = hostA
+        };
+        var pluginB = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "PluginB" },
+            instance = hostB
+        };
+
+        // First scan: both plugins present
+        tracker.ScanInstalledPlugins(new[] { pluginA, pluginB }, null);
+        Assert.Equal(2, service.GetTrackedWindows().Count);
+
+        // Second scan: PluginA uninstalled (only pluginB present)
+        tracker.ScanInstalledPlugins(new[] { pluginB }, null);
+
+        var remaining = service.GetTrackedWindows();
+        Assert.Single(remaining);
+        Assert.Equal("WinB", remaining[0].WindowName);
+        Assert.Null(tracker.TryFastTrackWindow("WinA"));
+    }
+
+    private class MockPluginManagerWithEvent
+    {
+        public event System.Action? OnInstalledPluginsChanged;
+        public void FireInstalledPluginsChanged() => OnInstalledPluginsChanged?.Invoke();
+    }
+
+    [Fact]
+    public void HookLifecycleEvents_SubscribesToOnInstalledPluginsChanged_AndUnsubscribesOnDispose()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPm = new MockPluginManagerWithEvent();
+
+        var hookMethod = typeof(DalamudWindowTracker).GetMethod(
+            "TryHookPluginManagerEvents",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(hookMethod);
+
+        hookMethod.Invoke(tracker, new object[] { mockPm });
+
+        var pmField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginManager",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(pmField);
+        Assert.Same(mockPm, pmField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(pmField.GetValue(tracker));
+    }
+
+    private class MockPluginInterfaceWithEvent
+    {
+        public event Dalamud.Plugin.IDalamudPluginInterface.ActivePluginsChangedDelegate? ActivePluginsChanged;
+        public void FireActivePluginsChanged(Dalamud.Plugin.IActivePluginsChangedEventArgs args) => ActivePluginsChanged?.Invoke(args);
+    }
+
+    [Fact]
+    public void HookLifecycleEvents_SubscribesToActivePluginsChanged_AndUnsubscribesOnDispose()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi = new MockPluginInterfaceWithEvent();
+
+        var hookMethod = typeof(DalamudWindowTracker).GetMethod(
+            "TryHookPluginInterfaceEvents",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(hookMethod);
+
+        hookMethod.Invoke(tracker, new object[] { mockPi });
+
+        var piField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginInterface",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(piField);
+        Assert.Same(mockPi, piField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(piField.GetValue(tracker));
+    }
+
+    [Fact]
+    public void HookLifecycleEvents_PreferredInterface_ReplacesExistingHook()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi1 = new MockPluginInterfaceWithEvent();
+        var mockPi2Preferred = new MockPluginInterfaceWithEvent();
+
+        tracker.TryHookPluginInterfaceEvents(mockPi1);
+
+        var piField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginInterface",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(piField);
+        Assert.Same(mockPi1, piField.GetValue(tracker));
+
+        // Preferred interface replaces the earlier one
+        tracker.TryHookPreferredPluginInterfaceEvents(mockPi2Preferred);
+        Assert.Same(mockPi2Preferred, piField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(piField.GetValue(tracker));
+    }
+
+    [Fact]
+    public void OnActivePluginsChanged_TriggersScanPlugins_AndLeavesIsScanningZero()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi = new MockPluginInterfaceWithEvent();
+        tracker.TryHookPluginInterfaceEvents(mockPi);
+
+        mockPi.FireActivePluginsChanged(null!);
+
+        var isScanningField = typeof(DalamudWindowTracker).GetField(
+            "isScanning",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(isScanningField);
+        Assert.Equal(0, (int)isScanningField.GetValue(tracker)!);
+    }
+
+    [Fact]
+    public void OnInstalledPluginsChanged_TriggersScanPlugins_AndLeavesIsScanningZero()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPm = new MockPluginManagerWithEvent();
+        tracker.TryHookPluginManagerEvents(mockPm);
+
+        mockPm.FireInstalledPluginsChanged();
+
+        var isScanningField = typeof(DalamudWindowTracker).GetField(
+            "isScanning",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(isScanningField);
+        Assert.Equal(0, (int)isScanningField.GetValue(tracker)!);
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReloads_InvalidatesIconCache()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var iconPath = DalamudWindowTracker.GetCachedIconPath("ReloadIconPlugin");
+        var dir = System.IO.Path.GetDirectoryName(iconPath)!;
+        System.IO.Directory.CreateDirectory(dir);
+
+        var oldIcon = new byte[] { 1, 1, 1 };
+        var newIcon = new byte[] { 2, 2, 2 };
+
+        System.IO.File.WriteAllBytes(iconPath, oldIcon);
+
+        try
+        {
+            var ws1 = new WindowSystem("Sys1");
+            ws1.AddWindow(new DummyWindow("W"));
+            var host1 = new PluginHost(ws1);
+            var plugin = new FakeLocalPluginWithInstance
+            {
+                Manifest = new FakeManifest { InternalName = "ReloadIconPlugin" },
+                instance = host1
+            };
+
+            tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+            var tracked1 = service.GetTrackedWindows().Single(t => t.WindowName == "W");
+            Assert.Equal(oldIcon, tracked1.IconBytes);
+
+            // Now update the icon on disk and reload plugin
+            System.IO.File.WriteAllBytes(iconPath, newIcon);
+
+            var ws2 = new WindowSystem("Sys2");
+            ws2.AddWindow(new DummyWindow("W"));
+            var host2 = new PluginHost(ws2);
+            plugin.instance = host2;
+
+            tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+            var tracked2 = service.GetTrackedWindows().Single(t => t.WindowName == "W");
+            Assert.Equal(newIcon, tracked2.IconBytes);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(iconPath))
+                System.IO.File.Delete(iconPath);
+        }
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReAddedAfterUnload_FiresPluginReloaded()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var reloadedFired = 0;
+        tracker.PluginReloaded += () => reloadedFired++;
+
+        var ws1 = new WindowSystem("Sys1");
+        var win1 = new DummyWindow("Win1");
+        ws1.AddWindow(win1);
+        var host1 = new PluginHost(ws1);
+
+        var plugin = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "ReloadPlugin" },
+            instance = host1
+        };
+
+        // First scan - plugin is newly loaded
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(1, reloadedFired);
+
+        // Second scan - plugin unloaded (instance = null)
+        plugin.instance = null;
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(2, reloadedFired);
+
+        // Third scan - plugin loaded again with new host
+        var ws2 = new WindowSystem("Sys2");
+        var win2 = new DummyWindow("Win1");
+        ws2.AddWindow(win2);
+        plugin.instance = new PluginHost(ws2);
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(3, reloadedFired);
+    }
 }
+
+
+
+
+

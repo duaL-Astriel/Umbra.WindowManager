@@ -114,6 +114,46 @@ public class WindowManagerService
         this.windows.TryRemove(window.WindowName, out _);
     }
 
+    public void UnregisterWindowsForPlugin(string pluginInternalName)
+    {
+        if (string.IsNullOrWhiteSpace(pluginInternalName))
+            return;
+
+        var affectedDockKeys = new HashSet<string>();
+        foreach (var (key, tw) in this.windows)
+        {
+            if (string.Equals(tw.PluginInternalName, pluginInternalName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (tw.DockGroupKey != null)
+                    affectedDockKeys.Add(tw.DockGroupKey);
+
+                this.windows.TryRemove(key, out _);
+            }
+        }
+
+        foreach (var dockKey in affectedDockKeys)
+        {
+            if (this.dockGroups.TryGetValue(dockKey, out var group))
+            {
+                var hasLiveMembers = false;
+                foreach (var member in group.Members)
+                {
+                    if (this.windows.ContainsKey(member.WindowName))
+                    {
+                        hasLiveMembers = true;
+                        break;
+                    }
+                }
+
+                if (!hasLiveMembers)
+                {
+                    this.RemoveDockGroup(dockKey);
+                }
+            }
+        }
+    }
+
+
     public void Minimize(TrackedWindow tracked)
     {
         if (tracked.DockGroupKey != null && this.dockGroups.TryGetValue(tracked.DockGroupKey, out var group))
