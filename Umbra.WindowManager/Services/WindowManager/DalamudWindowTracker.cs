@@ -520,85 +520,103 @@ public class DalamudWindowTracker : IDisposable
 
         if (obj is IDictionary dict)
         {
-            foreach (DictionaryEntry entry in dict)
+            var entries = new List<KeyValuePair<string, Umbra.Windows.IWindow>>();
+            try
             {
-                if (entry.Key is string instanceId && entry.Value is Umbra.Windows.IWindow window)
+                foreach (DictionaryEntry entry in dict)
                 {
-                    yield return new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, window);
+                    if (entry.Key is string instanceId && entry.Value is Umbra.Windows.IWindow window)
+                    {
+                        entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, window));
+                    }
                 }
             }
+            catch
+            {
+                // Best effort snapshot in case of concurrent dictionary modification by Umbra
+            }
+
+            return entries;
         }
+
+        return Enumerable.Empty<KeyValuePair<string, Umbra.Windows.IWindow>>();
     }
 
     private void HookUmbraWindowManagerEvents(object windowManager)
     {
-        if (ReferenceEquals(this.hookedUmbraWindowManager, windowManager))
-            return;
-
-        if (this.hookedUmbraWindowManager != null)
-            this.UnhookUmbraWindowManagerEvents();
-
-        this.hookedUmbraWindowManager = windowManager;
-
-        try
+        lock (this.knownUmbraWindows)
         {
-            var wmType = windowManager.GetType();
-            var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (openedEvent != null && openedEvent.EventHandlerType != null)
+            if (ReferenceEquals(this.hookedUmbraWindowManager, windowManager))
+                return;
+
+            if (this.hookedUmbraWindowManager != null)
+                this.UnhookUmbraWindowManagerEvents();
+
+            this.hookedUmbraWindowManager = windowManager;
+
+            try
             {
-                var handler = this.CreateUmbraEventHandler(openedEvent.EventHandlerType, this.OnUmbraWindowOpened);
-                if (handler != null)
+                var wmType = windowManager.GetType();
+                var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (openedEvent != null && openedEvent.EventHandlerType != null)
                 {
-                    openedEvent.AddEventHandler(windowManager, handler);
-                    this.onUmbraWindowOpenedHandler = handler;
+                    var handler = this.CreateUmbraEventHandler(openedEvent.EventHandlerType, this.OnUmbraWindowOpened);
+                    if (handler != null)
+                    {
+                        openedEvent.AddEventHandler(windowManager, handler);
+                        this.onUmbraWindowOpenedHandler = handler;
+                    }
+                }
+
+                var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (closedEvent != null && closedEvent.EventHandlerType != null)
+                {
+                    var handler = this.CreateUmbraEventHandler(closedEvent.EventHandlerType, this.OnUmbraWindowClosed);
+                    if (handler != null)
+                    {
+                        closedEvent.AddEventHandler(windowManager, handler);
+                        this.onUmbraWindowClosedHandler = handler;
+                    }
                 }
             }
-
-            var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-            if (closedEvent != null && closedEvent.EventHandlerType != null)
+            catch
             {
-                var handler = this.CreateUmbraEventHandler(closedEvent.EventHandlerType, this.OnUmbraWindowClosed);
-                if (handler != null)
-                {
-                    closedEvent.AddEventHandler(windowManager, handler);
-                    this.onUmbraWindowClosedHandler = handler;
-                }
+                // Best effort
             }
-        }
-        catch
-        {
-            // Best effort
         }
     }
 
     private void UnhookUmbraWindowManagerEvents()
     {
-        if (this.hookedUmbraWindowManager == null)
-            return;
-
-        try
+        lock (this.knownUmbraWindows)
         {
-            var wmType = this.hookedUmbraWindowManager.GetType();
-            if (this.onUmbraWindowOpenedHandler != null)
+            if (this.hookedUmbraWindowManager == null)
+                return;
+
+            try
             {
-                var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                openedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowOpenedHandler);
+                var wmType = this.hookedUmbraWindowManager.GetType();
+                if (this.onUmbraWindowOpenedHandler != null)
+                {
+                    var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    openedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowOpenedHandler);
+                }
+
+                if (this.onUmbraWindowClosedHandler != null)
+                {
+                    var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    closedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowClosedHandler);
+                }
+            }
+            catch
+            {
+                // Best effort
             }
 
-            if (this.onUmbraWindowClosedHandler != null)
-            {
-                var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                closedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowClosedHandler);
-            }
+            this.hookedUmbraWindowManager = null;
+            this.onUmbraWindowOpenedHandler = null;
+            this.onUmbraWindowClosedHandler = null;
         }
-        catch
-        {
-            // Best effort
-        }
-
-        this.hookedUmbraWindowManager = null;
-        this.onUmbraWindowOpenedHandler = null;
-        this.onUmbraWindowClosedHandler = null;
     }
 
     private Delegate? CreateUmbraEventHandler(Type eventHandlerType, Action<object?> callback)
@@ -1397,7 +1415,8 @@ public class DalamudWindowTracker : IDisposable
             {
                 var tw = this.windowManagerService.RegisterWindow(adapter);
                 tw.PluginInternalName = "Umbra";
-                tw.IconBytes = this.TryLoadUmbraCoreIcon();
+                var coreIcon = this.TryLoadUmbraCoreIcon();
+                if (coreIcon != null) tw.IconBytes = coreIcon;
                 adapter.IsBeingMinimized = () => tw.IsMinimized;
                 return tw;
             }

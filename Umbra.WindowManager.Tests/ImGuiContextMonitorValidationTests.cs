@@ -180,6 +180,49 @@ public class ImGuiContextMonitorValidationTests
         Assert.NotNull(tracked);
         Assert.Equal("StandardWindow", tracked.WindowName);
     }
+
+    [Fact]
+    public void UpdateUnseenFrames_WhenIdMatchedWindowIsObserved_UnseenFramesRemainsZero()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var windowWithId = new DummyWindow("Settings###UmbraSettings") { IsOpen = true };
+        var tw = service.RegisterWindow(windowWithId);
+
+        monitor.PopulateTrackedMap();
+
+        var seenWindowsField = typeof(ImGuiContextMonitor).GetField(
+            "seenWindows",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(seenWindowsField);
+
+        var seenWindows = (HashSet<string>)seenWindowsField.GetValue(monitor)!;
+
+        // Simulate observing the window by its bare ID (e.g. "UmbraSettings")
+        seenWindows.Add("UmbraSettings");
+
+        Assert.Equal(0, tw.UnseenFrames);
+
+        monitor.UpdateUnseenFrames();
+
+        // tw.UnseenFrames should remain 0 because bare ID matched in seenWindows
+        Assert.Equal(0, tw.UnseenFrames);
+    }
+
+    [Fact]
+    public void UpdateUnseenFrames_WhenUnobserved_IncrementsUnseenFrames()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var windowWithId = new DummyWindow("Settings###UmbraSettings") { IsOpen = true };
+        var tw = service.RegisterWindow(windowWithId);
+
+        monitor.PopulateTrackedMap();
+
+        monitor.UpdateUnseenFrames();
+
+        Assert.Equal(1, tw.UnseenFrames);
+    }
 }
 
 

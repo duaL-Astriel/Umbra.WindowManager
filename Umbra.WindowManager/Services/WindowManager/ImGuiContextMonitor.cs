@@ -127,6 +127,7 @@ public class ImGuiContextMonitor
             }
 
             this.seenWindows.Add(name);
+            this.seenWindows.Add(tracked.WindowName);
 
             // Validate window presence: dimensions, content, and visibility
             var hasValidSize = ValidateWindowDimensions(win.Size);
@@ -244,10 +245,15 @@ public class ImGuiContextMonitor
         }
 
         // For open non-minimized windows not observed in ctx.Windows, count missing frames
+        this.UpdateUnseenFrames();
+    }
+
+    internal void UpdateUnseenFrames()
+    {
         for (var i = 0; i < this.trackedBuffer.Count; i++)
         {
             var t = this.trackedBuffer[i];
-            if (this.seenWindows.Contains(t.WindowName))
+            if (this.seenWindows.Contains(t.WindowName) || (!string.IsNullOrEmpty(t.Id) && this.seenWindows.Contains(t.Id)))
                 continue;
 
             if (t.IsOpen && !t.IsMinimized)
