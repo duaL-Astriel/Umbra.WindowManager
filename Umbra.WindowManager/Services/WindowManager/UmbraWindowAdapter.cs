@@ -15,7 +15,12 @@ namespace Umbra.WindowManager.Services.WindowManager;
 public class UmbraWindowAdapter : IWindow
 {
     private readonly Umbra.Windows.IWindow umbraWindow;
-    private readonly Func<bool>? isBeingMinimized;
+
+    /// <summary>
+    /// Optional delegate evaluated when <see cref="IsOpen"/> is set to <c>false</c>.
+    /// If it returns <c>true</c>, the window is minimized rather than closed.
+    /// </summary>
+    public Func<bool>? IsBeingMinimized { get; set; }
 
     public UmbraWindowAdapter(
         string instanceId,
@@ -28,7 +33,7 @@ public class UmbraWindowAdapter : IWindow
 
         this.InstanceId = instanceId;
         this.umbraWindow = umbraWindow;
-        this.isBeingMinimized = isBeingMinimized;
+        this.IsBeingMinimized = isBeingMinimized;
 
         var effectiveTitle = title != null
             ? (!string.IsNullOrWhiteSpace(title) ? title : null)
@@ -92,7 +97,7 @@ public class UmbraWindowAdapter : IWindow
             }
             else
             {
-                if (this.isBeingMinimized?.Invoke() == true)
+                if (this.IsBeingMinimized?.Invoke() == true)
                 {
                     SetMemberValue(this.umbraWindow, nameof(Umbra.Windows.IWindow.IsMinimized), true);
                 }

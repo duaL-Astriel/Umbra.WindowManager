@@ -1498,6 +1498,181 @@ public class DalamudWindowTrackerTests
         tracker.ScanInstalledPlugins(new[] { plugin }, null);
         Assert.Equal(3, reloadedFired);
     }
+
+    private class MockUmbraWindow : Umbra.Windows.IWindow
+    {
+        public System.Numerics.Vector2 Position { get; set; } = new(100, 150);
+        public System.Numerics.Vector2 Size { get; set; } = new(400, 300);
+        public bool IsClosed { get; set; }
+        public bool IsMinimized { get; set; }
+        public bool IsFocused { get; set; }
+        public bool IsHovered { get; set; }
+        public bool CloseCalled { get; private set; }
+
+        public event Action? RequestClose;
+
+        public void Close()
+        {
+            this.CloseCalled = true;
+            this.IsClosed = true;
+            this.RequestClose?.Invoke();
+        }
+
+        public void Render(string instanceId) { }
+        public void Dispose() { }
+    }
+
+    private class FakeUmbraWindowManager
+    {
+        public Dictionary<string, Umbra.Windows.IWindow> _instances { get; } = new();
+        public event Action<Umbra.Windows.IWindow>? OnWindowOpened;
+        public event Action<Umbra.Windows.IWindow>? OnWindowClosed;
+
+        public void Open(string instanceId, Umbra.Windows.IWindow window)
+        {
+            this._instances[instanceId] = window;
+            this.OnWindowOpened?.Invoke(window);
+        }
+
+        public void Close(string instanceId)
+        {
+            if (this._instances.Remove(instanceId, out var window))
+            {
+                this.OnWindowClosed?.Invoke(window);
+            }
+        }
+    }
+
+    [Fact]
+    public void ScanUmbra_TryLoadUmbraCoreIcon_LoadsEmbeddedLogoBytes()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var icon = tracker.TryLoadUmbraCoreIcon();
+
+        Assert.NotNull(icon);
+        Assert.NotEmpty(icon);
+        var iconCached = tracker.TryLoadUmbraCoreIcon();
+        Assert.Same(icon, iconCached);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_RegistersWindowsUnderUmbraWithLogo()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+        var logoBytes = new byte[] { 1, 2, 3 };
+
+        tracker.ScanUmbraCoreWindows(fakeWm, logoBytes);
+
+        var tracked = service.GetTrackedWindows();
+        var tw = Assert.Single(tracked);
+        Assert.Equal("UmbraSettings", tw.Id);
+        Assert.Equal("Umbra", tw.PluginInternalName);
+        Assert.Same(logoBytes, tw.IconBytes);
+        Assert.True(tw.TryGetWindow(out var win));
+        Assert.IsType<UmbraWindowAdapter>(win);
+        var adapter = (UmbraWindowAdapter)win;
+        Assert.Same(mockWindow, adapter.UnderlyingWindow);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_WiresIsBeingMinimizedToTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        var tw = service.GetTrackedWindows().Single();
+        Assert.True(tw.TryGetWindow(out var win));
+        var adapter = (UmbraWindowAdapter)win;
+
+        // When tw.IsMinimized is true, setting adapter.IsOpen = false should minimize rather than close
+        tw.IsMinimized = true;
+        adapter.IsOpen = false;
+
+        Assert.True(mockWindow.IsMinimized);
+        Assert.False(mockWindow.CloseCalled);
+    }
+
+    [Fact]
+    public void ScanUmbra_TryFastTrackWindow_ResolvesUmbraWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 4, 5 });
+
+        var tw = tracker.TryFastTrackWindow("UmbraSettings");
+        Assert.NotNull(tw);
+        Assert.Equal("Umbra", tw.PluginInternalName);
+        Assert.Equal("UmbraSettings", tw.Id);
+        Assert.NotNull(tw.IconBytes);
+    }
+
+    [Fact]
+    public void ScanUmbra_UntrackPlugin_Umbra_ClearsWindowsAndState()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        fakeWm._instances["UmbraSettings"] = new MockUmbraWindow();
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+        Assert.Single(service.GetTrackedWindows());
+
+        tracker.UntrackPlugin("Umbra");
+
+        Assert.Empty(service.GetTrackedWindows());
+
+        // Further events on old fakeWm should not register
+        fakeWm.Open("NewWindow", new MockUmbraWindow());
+        Assert.Empty(service.GetTrackedWindows());
+    }
+
+    [Fact]
+    public void ScanUmbra_Events_DynamicallyRegisterAndUnregisterWindows()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var logoBytes = new byte[] { 9, 9 };
+
+        tracker.ScanUmbraCoreWindows(fakeWm, logoBytes);
+        Assert.Empty(service.GetTrackedWindows());
+
+        var win1 = new MockUmbraWindow();
+        fakeWm.Open("WidgetBrowser", win1);
+
+        var tracked = service.GetTrackedWindows();
+        var tw = Assert.Single(tracked);
+        Assert.Equal("WidgetBrowser", tw.Id);
+        Assert.Equal("Umbra", tw.PluginInternalName);
+
+        fakeWm.Close("WidgetBrowser");
+        Assert.Empty(service.GetTrackedWindows());
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraWindows_OutsideGame_DoesNotThrow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ex = Record.Exception(() => tracker.ScanUmbraWindows());
+        Assert.Null(ex);
+    }
 }
 
 
