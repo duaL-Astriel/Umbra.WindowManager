@@ -49,6 +49,35 @@ public class ImGuiContextMonitor
     public static bool IsWindowDocked(uint dockId, bool dockNodeVisible) =>
         dockId != 0 && dockNodeVisible;
 
+    /// <summary>
+    /// Decides whether a raw-ImGui window should minimize to the toolbar this frame from a title-bar
+    /// affordance (issue #38). Raw windows have no <see cref="Dalamud.Interface.Windowing.IWindow"/> and so
+    /// get no injected title-bar button, but the native collapse arrow and a title-bar double-click can
+    /// still be intercepted on the raw window and routed to a clean minimize -- mirroring the IWindow path.
+    /// Returns true when the window is on-screen (not already soft-hidden), has a title bar, and either the
+    /// native collapse was triggered or the user double-clicked within the title-bar band while the window
+    /// is the hovered (non-occluded) one. The live ImGui reads are gathered in <see cref="OnDraw"/> and
+    /// passed in so this stays unit-testable like the other monitor predicates.
+    /// </summary>
+    public static bool ShouldMinimizeRawWindowFromTitleBar(
+        bool isMinimized,
+        bool hasTitleBar,
+        bool collapsed,
+        bool titleBarDoubleClicked,
+        bool hovered,
+        System.Numerics.Vector2 mousePos,
+        System.Numerics.Vector2 windowPos,
+        System.Numerics.Vector2 windowSize,
+        float titleBarHeight)
+    {
+        if (isMinimized || !hasTitleBar) return false;
+        if (collapsed) return true;
+        if (!titleBarDoubleClicked || !hovered) return false;
+
+        return mousePos.X >= windowPos.X && mousePos.X <= windowPos.X + windowSize.X &&
+               mousePos.Y >= windowPos.Y && mousePos.Y <= windowPos.Y + titleBarHeight;
+    }
+
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
     {
@@ -160,6 +189,20 @@ public class ImGuiContextMonitor
                 rawWin.ObservedFocused = !ctx.NavWindow.IsNull &&
                                          (IntPtr)ctx.NavWindow.Handle == (IntPtr)win.Handle;
                 rawWin.UnseenFrames = 0;
+
+                // Title-bar minimize affordances for raw windows (issue #38). No injected button is possible
+                // (no IWindow.TitleBarButtons), but the native collapse arrow and a title-bar double-click can
+                // be intercepted on the raw `win` and routed to a clean minimize-to-toolbar. Applied before
+                // ComputeFrameAction so the soft-hide takes effect this same frame.
+                var rawTitleBarHeight = ImGui.GetFontSize() + ImGui.GetStyle().FramePadding.Y * 2.0f;
+                if (ShouldMinimizeRawWindowFromTitleBar(
+                        rawWin.IsMinimized, rawWin.HasTitleBar, win.Collapsed,
+                        ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left), ctx.HoveredWindow == win,
+                        ImGui.GetMousePos(), win.Pos, win.Size, rawTitleBarHeight))
+                {
+                    win.Collapsed = false; // undo the native collapse (a no-op for the double-click path)
+                    this.windowManager.Minimize(tracked);
+                }
 
                 var action = rawWin.ComputeFrameAction(OffScreenPos);
                 switch (action.Kind)

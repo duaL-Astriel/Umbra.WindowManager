@@ -144,7 +144,7 @@ For a raw tracked window in the loop:
     `ImGui.SetWindowFocus(name)`; clear `SavedRestorePos`.
   - else if `PendingFocus`: `ImGui.SetWindowFocus(name)`; clear it.
   - set `WasMinimizedLastFrame = IsMinimized`.
-- Raw windows are routed out of the draw-loop's per-window handling (an early `continue`) before the native-collapse guard and title-bar double-click-to-minimize, so those affordances are NOT wired for raw windows in this implementation; raw windows are minimized via the Umbra toolbar button and the context menu. Wiring native-collapse / title-bar double-click for raw windows (they operate on the raw `win`, not `IWindow`, so it is feasible) is a possible follow-up.
+- Raw windows are routed out of the draw-loop's per-window handling (an early `continue`) and so never reach the shared `IWindow` native-collapse guard / title-bar double-click block. Instead, the raw block wires the same two affordances itself via the pure predicate `ImGuiContextMonitor.ShouldMinimizeRawWindowFromTitleBar(...)` (operating on the raw `win`, not `IWindow`): a native collapse or a title-bar double-click on a raw window is intercepted and routed to a clean toolbar minimize (the collapse is undone with `win.Collapsed = false`). Applied before `ComputeFrameAction` so the soft-hide takes effect the same frame. There is still no *injected* title-bar button (that needs `IWindow.TitleBarButtons`); the toolbar button and context menu remain available too.
 
 `OffScreen` is a fixed far-negative position (e.g. `(-32000, -32000)`). Plugins
 that call `SetNextWindowPos` every frame will win the fight; that is the
@@ -225,6 +225,11 @@ testable and only the thin adapter that calls ImGui is left uncovered.
 - **Monitor decision logic** — via the seam: minimized ⇒ off-screen write;
   restore edge ⇒ reposition + focus; pending focus ⇒ focus; unseen ⇒
   `UnseenFrames` climbs.
+- **`ShouldMinimizeRawWindowFromTitleBar`** (in `ImGuiContextMonitorValidationTests`)
+  — table-driven: native collapse ⇒ minimize; double-click inside the title-bar
+  band while hovered ⇒ minimize; double-click below the band / outside the window /
+  while occluded / single-click ⇒ no minimize; already minimized or `NoTitleBar` ⇒
+  no minimize.
 
 ## Acceptance (maps to the issue)
 
@@ -239,6 +244,6 @@ testable and only the thin adapter that calls ImGui is left uncovered.
 
 ## Out of scope
 
-- Title-bar minimize-button injection for raw windows (no `IWindow`; the toolbar button and context menu cover minimize). Native-collapse and title-bar double-click-to-minimize are also not wired for raw windows (possible follow-up).
+- Title-bar minimize-button *injection* for raw windows (no `IWindow`; the toolbar button, context menu, title-bar double-click, and native-collapse interception cover minimize). Drawing a custom (non-injected) title-bar button, like the dock-group button, remains a possible follow-up.
 - Dock-group participation for raw windows.
 - Fighting plugins that hard-pin their own position every frame.

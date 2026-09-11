@@ -218,3 +218,9 @@ brings it back and focuses it, and a plugin that repositions itself every frame
 can fight the off-screen hide. Windows a plugin fully closes drop from the
 toolbar automatically.
 
+Raw windows get no *injected* title-bar minimize button (that button requires an
+`IWindow`, which they lack). They can still be minimized from the toolbar button,
+the right-click context menu, and — like managed windows — by double-clicking
+their title bar or triggering ImGui's native collapse arrow, both of which are
+intercepted and routed to a clean toolbar minimize.
+

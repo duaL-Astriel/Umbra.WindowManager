@@ -81,4 +81,39 @@ public class ImGuiContextMonitorValidationTests
         Assert.True((once & Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize) != 0);
         Assert.Equal(once, twice);
     }
+
+    // Raw-window title-bar minimize affordances (issue #38). Raw windows get no injected title-bar button
+    // (no IWindow.TitleBarButtons), but the native collapse arrow and a title-bar double-click are
+    // intercepted on the raw window and routed to a clean minimize-to-toolbar. Window rect is
+    // pos (100,100), size (200,150); the title bar is the top 20px band -> x in [100,300], y in [100,120].
+    [Theory]
+    // Native collapse arrow -> minimize, regardless of mouse position.
+    [InlineData(false, true, true, false, false, 0f, 0f, true)]
+    // Double-click inside the title-bar band while hovered -> minimize.
+    [InlineData(false, true, false, true, true, 150f, 110f, true)]
+    // Double-click below the title bar (in the client area) -> no minimize.
+    [InlineData(false, true, false, true, true, 150f, 130f, false)]
+    // Double-click horizontally outside the window -> no minimize.
+    [InlineData(false, true, false, true, true, 350f, 110f, false)]
+    // Double-click in the band but another window is hovered (occluded) -> no minimize.
+    [InlineData(false, true, false, true, false, 150f, 110f, false)]
+    // A single click (not a double-click) in the band -> no minimize.
+    [InlineData(false, true, false, false, true, 150f, 110f, false)]
+    // Already soft-hidden (minimized): neither collapse nor double-click re-triggers.
+    [InlineData(true, true, true, true, true, 150f, 110f, false)]
+    // No title bar (NoTitleBar flag): no title-bar affordance at all.
+    [InlineData(false, false, true, true, true, 150f, 110f, false)]
+    public void ShouldMinimizeRawWindowFromTitleBar_EvaluatesCollapseAndDoubleClick(
+        bool isMinimized, bool hasTitleBar, bool collapsed, bool doubleClicked, bool hovered,
+        float mouseX, float mouseY, bool expected)
+    {
+        var result = ImGuiContextMonitor.ShouldMinimizeRawWindowFromTitleBar(
+            isMinimized, hasTitleBar, collapsed, doubleClicked, hovered,
+            new Vector2(mouseX, mouseY),
+            windowPos: new Vector2(100f, 100f),
+            windowSize: new Vector2(200f, 150f),
+            titleBarHeight: 20f);
+
+        Assert.Equal(expected, result);
+    }
 }
