@@ -691,5 +691,159 @@ public class WindowManagerServiceTests
         Assert.True(tw.IsManageable);
         Assert.Contains(tw, service.GetVisibleAndMinimizedWindows());
     }
+
+    [Fact]
+    public void WindowManagerService_AreAnyWindowsOpen_ReflectsOpenManageableWindows()
+    {
+        var service = new WindowManagerService();
+        Assert.False(service.AreAnyWindowsOpen);
+
+        var win1 = new DummyWindow("Win1") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        Assert.True(service.AreAnyWindowsOpen);
+
+        // Minimized windows are not counted as open
+        service.Minimize(tw1);
+        Assert.False(service.AreAnyWindowsOpen);
+
+        // Window without title / not manageable
+        var unmanageable = new DummyWindow("") { IsOpen = true };
+        service.RegisterWindow(unmanageable);
+        Assert.False(service.AreAnyWindowsOpen);
+
+        service.Restore(tw1);
+        Assert.True(service.AreAnyWindowsOpen);
+    }
+
+    [Fact]
+    public void WindowManagerService_MinimizeAll_MinimizesOpenWindows_AndRecordsSnapshot()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Win1") { IsOpen = true };
+        var win2 = new DummyWindow("Win2") { IsOpen = true };
+        var win3 = new DummyWindow("Win3") { IsOpen = false }; // already closed/minimized
+
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+        var tw3 = service.RegisterWindow(win3);
+
+        Assert.True(service.AreAnyWindowsOpen);
+        Assert.False(service.CanRestoreBulkMinimized);
+
+        service.MinimizeAll();
+
+        Assert.True(tw1.IsMinimized);
+        Assert.False(win1.IsOpen);
+        Assert.True(tw2.IsMinimized);
+        Assert.False(win2.IsOpen);
+        Assert.False(service.AreAnyWindowsOpen);
+        Assert.True(service.CanRestoreBulkMinimized);
+
+        // win3 was not open, so it should not be in snapshot
+        Assert.Contains("Win1", service.LastBulkMinimizedKeys);
+        Assert.Contains("Win2", service.LastBulkMinimizedKeys);
+        Assert.DoesNotContain("Win3", service.LastBulkMinimizedKeys);
+    }
+
+    [Fact]
+    public void WindowManagerService_MinimizeAll_WithDockGroups_MinimizesGroupCollectively()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab1") { IsOpen = true };
+        var win2 = new DummyWindow("Tab2") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+
+        service.RegisterDockGroup("dock_1", "Tab1", [tw1, tw2]);
+
+        service.MinimizeAll();
+
+        var group = service.GetDockGroup("dock_1");
+        Assert.NotNull(group);
+        Assert.True(group.IsMinimized);
+        Assert.True(tw1.IsMinimized);
+        Assert.True(tw2.IsMinimized);
+        Assert.Contains("Tab1", service.LastBulkMinimizedKeys);
+        Assert.Contains("Tab2", service.LastBulkMinimizedKeys);
+    }
+
+    [Fact]
+    public void WindowManagerService_RestoreAll_RestoresSnapshotAndClearsIt()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Win1") { IsOpen = true };
+        var win2 = new DummyWindow("Win2") { IsOpen = true };
+        var win3 = new DummyWindow("Win3") { IsOpen = true };
+
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+        var tw3 = service.RegisterWindow(win3);
+
+        // Pre-minimize win3 manually so it's not part of the bulk snapshot
+        service.Minimize(tw3);
+
+        service.MinimizeAll();
+        Assert.True(service.CanRestoreBulkMinimized);
+        Assert.DoesNotContain("Win3", service.LastBulkMinimizedKeys);
+
+        service.RestoreAll();
+
+        // win1 and win2 were restored
+        Assert.False(tw1.IsMinimized);
+        Assert.True(win1.IsOpen);
+        Assert.False(tw2.IsMinimized);
+        Assert.True(win2.IsOpen);
+
+        // win3 was NOT in bulk snapshot, so it remains minimized
+        Assert.True(tw3.IsMinimized);
+        Assert.False(win3.IsOpen);
+
+        // Snapshot is now cleared
+        Assert.Empty(service.LastBulkMinimizedKeys);
+        Assert.False(service.CanRestoreBulkMinimized);
+    }
+
+    [Fact]
+    public void WindowManagerService_RestoreAll_WithDockGroup_PreservesActiveTab()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Tab1") { IsOpen = true, RequestFocus = false };
+        var win2 = new DummyWindow("Tab2") { IsOpen = true, RequestFocus = false };
+        var tw1 = service.RegisterWindow(win1);
+        var tw2 = service.RegisterWindow(win2);
+
+        service.RegisterDockGroup("dock_1", "Tab2", [tw1, tw2]);
+
+        service.MinimizeAll();
+        service.RestoreAll();
+
+        var group = service.GetDockGroup("dock_1");
+        Assert.NotNull(group);
+        Assert.False(group.IsMinimized);
+        Assert.False(tw1.IsMinimized);
+        Assert.False(tw2.IsMinimized);
+        Assert.Equal("Tab2", group.ActiveWindowName);
+        Assert.True(win2.RequestFocus);
+    }
+
+    [Fact]
+    public void WindowManagerService_InterleavedAction_ResetsToggleState()
+    {
+        var service = new WindowManagerService();
+        var win1 = new DummyWindow("Win1") { IsOpen = true };
+        var tw1 = service.RegisterWindow(win1);
+
+        service.MinimizeAll();
+        Assert.True(service.CanRestoreBulkMinimized);
+        Assert.False(service.AreAnyWindowsOpen);
+
+        // User manually restores or opens another window
+        var win2 = new DummyWindow("Win2") { IsOpen = true };
+        service.RegisterWindow(win2);
+
+        // Now windows are open again, so AreAnyWindowsOpen is true and CanRestoreBulkMinimized is false
+        Assert.True(service.AreAnyWindowsOpen);
+        Assert.False(service.CanRestoreBulkMinimized);
+    }
 }
 
