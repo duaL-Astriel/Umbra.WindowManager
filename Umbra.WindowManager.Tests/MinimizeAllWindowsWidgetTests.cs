@@ -46,6 +46,7 @@ public class MinimizeAllWindowsWidgetTests
         Assert.Equal(4f, widget.Node.Style.Gap);
         Assert.True(widget.Decorate);
         Assert.True(widget.Toggle);
+        Assert.True(widget.AutoHide);
 
         var btn = widget.ButtonNode;
         Assert.NotNull(btn);
@@ -71,20 +72,65 @@ public class MinimizeAllWindowsWidgetTests
 
         Assert.Equal("Minimize All Windows", widget.ButtonNode.Tooltip);
         Assert.Equal(1.0f, widget.ButtonNode.Style.Opacity);
+        Assert.NotEqual(false, widget.ButtonNode.Style.IsVisible);
         Assert.DoesNotContain("active", widget.ButtonNode.ClassList);
     }
 
     [Fact]
-    public void UpdateButtonState_WithNoWindowsOpen_SetsMinimizeTooltipAndDimmedOpacity()
+    public void UpdateButtonState_WithNoWindowsOpen_WhenAutoHideDisabled_SetsDimmedOpacity()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+        widget.AutoHide = false;
+
+        widget.UpdateButtonState();
+
+        Assert.Equal("Minimize All Windows", widget.ButtonNode.Tooltip);
+        Assert.Equal(0.6f, widget.ButtonNode.Style.Opacity);
+        Assert.NotEqual(false, widget.ButtonNode.Style.IsVisible);
+        Assert.DoesNotContain("active", widget.ButtonNode.ClassList);
+    }
+
+    [Fact]
+    public void UpdateButtonState_WithAutoHideOn_HidesButtonWhenNoWindowsOpen()
     {
         var service = new WindowManagerService();
         var widget = CreateWidget(service);
 
         widget.UpdateButtonState();
 
-        Assert.Equal("Minimize All Windows", widget.ButtonNode.Tooltip);
-        Assert.Equal(0.6f, widget.ButtonNode.Style.Opacity);
-        Assert.DoesNotContain("active", widget.ButtonNode.ClassList);
+        Assert.False(widget.ButtonNode.Style.IsVisible ?? true);
+        Assert.False(widget.Node.Style.IsVisible ?? true);
+    }
+
+    [Fact]
+    public void UpdateButtonState_WithAutoHideOn_ShowsButtonWhenWindowsOpen()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("OpenWindow");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtonState();
+
+        Assert.NotEqual(false, widget.ButtonNode.Style.IsVisible);
+        Assert.NotEqual(false, widget.Node.Style.IsVisible);
+    }
+
+    [Fact]
+    public void UpdateButtonState_WithAutoHideOn_ShowsButtonWhenBulkMinimized()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("OpenWindow");
+        service.RegisterWindow(win);
+
+        var widget = CreateWidget(service);
+        widget.PerformAction(); // minimizes all
+
+        Assert.True(service.CanRestoreBulkMinimized);
+        Assert.NotEqual(false, widget.ButtonNode.Style.IsVisible);
+        Assert.NotEqual(false, widget.Node.Style.IsVisible);
+        Assert.Equal("Restore Windows", widget.ButtonNode.Tooltip);
     }
 
     [Fact]
@@ -190,9 +236,10 @@ public class MinimizeAllWindowsWidgetTests
         Assert.NotNull(method);
         var configVars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
         Assert.NotNull(configVars);
-        Assert.Equal(2, configVars.Count);
+        Assert.Equal(3, configVars.Count);
         Assert.Contains(configVars, v => v.Id == "Decorate");
         Assert.Contains(configVars, v => v.Id == "MinimizeAll.Toggle");
+        Assert.Contains(configVars, v => v.Id == "MinimizeAll.AutoHide");
 
         widget.Decorate = false;
         Assert.False(widget.Decorate);
@@ -208,6 +255,11 @@ public class MinimizeAllWindowsWidgetTests
         Assert.False(widget.Toggle);
         widget.Toggle = true;
         Assert.True(widget.Toggle);
+
+        widget.AutoHide = false;
+        Assert.False(widget.AutoHide);
+        widget.AutoHide = true;
+        Assert.True(widget.AutoHide);
     }
 
     [Fact]

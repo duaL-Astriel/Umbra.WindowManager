@@ -204,6 +204,7 @@ To load the built `Umbra.WindowManager.dll`:
 |---|---|---|---|
 | `Decorate` | Boolean | `true` | Whether the button receives Umbra background and border styling (`.decorated`). |
 | `MinimizeAll.Toggle` | Boolean | `true` | Allow toggling between minimizing all windows and restoring previously minimized windows. |
+| `MinimizeAll.AutoHide` | Boolean | `true` | Automatically hide the button from the toolbar when no windows are open. |
 
 ---
 

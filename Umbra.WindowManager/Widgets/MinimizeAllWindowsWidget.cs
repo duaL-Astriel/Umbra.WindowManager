@@ -82,6 +82,7 @@ public class MinimizeAllWindowsWidget : ToolbarWidget
 
     private bool decorate = true;
     private bool toggle = true;
+    private bool autoHide = true;
 
     public MinimizeAllWindowsWidget(
         WidgetInfo info,
@@ -111,6 +112,11 @@ public class MinimizeAllWindowsWidget : ToolbarWidget
                 this.toggle = togb;
             else if (configValues.TryGetValue("Toggle", out var togd) && togd is bool togdb)
                 this.toggle = togdb;
+
+            if (configValues.TryGetValue("MinimizeAll.AutoHide", out var ah) && ah is bool ahb)
+                this.autoHide = ahb;
+            else if (configValues.TryGetValue("AutoHide", out var ahd) && ahd is bool ahdb)
+                this.autoHide = ahdb;
         }
 
         this.iconNode = new Node
@@ -213,6 +219,27 @@ public class MinimizeAllWindowsWidget : ToolbarWidget
         }
     }
 
+    [ConfigVariable("MinimizeAll.AutoHide", "General", "Minimize All Windows")]
+    public bool AutoHide
+    {
+        get
+        {
+            if (this.HasConfigVariable("MinimizeAll.AutoHide"))
+                return this.GetConfigValue<bool>("MinimizeAll.AutoHide");
+            if (this.HasConfigVariable("AutoHide"))
+                return this.GetConfigValue<bool>("AutoHide");
+            return this.autoHide;
+        }
+        set
+        {
+            this.autoHide = value;
+            if (this.HasConfigVariable("MinimizeAll.AutoHide"))
+                this.SetConfigValue("MinimizeAll.AutoHide", value);
+            if (this.HasConfigVariable("AutoHide"))
+                this.SetConfigValue("AutoHide", value);
+        }
+    }
+
     protected override void Initialize()
     {
     }
@@ -242,6 +269,10 @@ public class MinimizeAllWindowsWidget : ToolbarWidget
 
         var canRestore = this.Toggle && this.windowManager.CanRestoreBulkMinimized;
         var anyOpen = this.windowManager.AreAnyWindowsOpen;
+
+        var isVisible = !this.AutoHide || anyOpen || canRestore;
+        this.buttonNode.Style.IsVisible = isVisible;
+        this.rootNode.Style.IsVisible = isVisible;
 
         if (canRestore)
         {
@@ -275,6 +306,16 @@ public class MinimizeAllWindowsWidget : ToolbarWidget
                 "MinimizeAll.Toggle",
                 "Toggle Restore on Click",
                 "Allow toggling between minimizing all windows and restoring previously minimized windows.",
+                true
+            )
+            {
+                Category = "General",
+                Group = "Minimize All Windows"
+            },
+            new BooleanWidgetConfigVariable(
+                "MinimizeAll.AutoHide",
+                "Auto Hide",
+                "Automatically hide the button when no windows are open.",
                 true
             )
             {
