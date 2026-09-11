@@ -190,6 +190,18 @@ public class DalamudWindowTrackerTests
         Assert.Null(ex);
     }
 
+    [Fact]
+    public void ScanPlugins_ResetsIsScanning_AfterCompletion()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var field = typeof(DalamudWindowTracker).GetField("isScanning", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(field);
+        var value = (int)field.GetValue(tracker)!;
+        Assert.Equal(0, value);
+    }
+
     // Mirrors Dalamud.Interface.Internal.DalamudInterface, which owns the core window system
     // (Plugin Installer, Settings, Console, ...) in a private WindowSystem field rather than
     // exposing it through PluginManager.InstalledPlugins (issue #36 part 1).
@@ -1339,7 +1351,32 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void OnActivePluginsChanged_TriggersScanPlugins()
+    public void HookLifecycleEvents_PreferredInterface_ReplacesExistingHook()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi1 = new MockPluginInterfaceWithEvent();
+        var mockPi2Preferred = new MockPluginInterfaceWithEvent();
+
+        tracker.TryHookPluginInterfaceEvents(mockPi1);
+
+        var piField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginInterface",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(piField);
+        Assert.Same(mockPi1, piField.GetValue(tracker));
+
+        // Preferred interface replaces the earlier one
+        tracker.TryHookPreferredPluginInterfaceEvents(mockPi2Preferred);
+        Assert.Same(mockPi2Preferred, piField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(piField.GetValue(tracker));
+    }
+
+    [Fact]
+    public void OnActivePluginsChanged_TriggersScanPlugins_AndLeavesIsScanningZero()
     {
         var service = new WindowManagerService();
         var tracker = new DalamudWindowTracker(service);
@@ -1347,12 +1384,17 @@ public class DalamudWindowTrackerTests
         var mockPi = new MockPluginInterfaceWithEvent();
         tracker.TryHookPluginInterfaceEvents(mockPi);
 
-        var ex = Record.Exception(() => mockPi.FireActivePluginsChanged(null!));
-        Assert.Null(ex);
+        mockPi.FireActivePluginsChanged(null!);
+
+        var isScanningField = typeof(DalamudWindowTracker).GetField(
+            "isScanning",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(isScanningField);
+        Assert.Equal(0, (int)isScanningField.GetValue(tracker)!);
     }
 
     [Fact]
-    public void OnInstalledPluginsChanged_TriggersScanPlugins()
+    public void OnInstalledPluginsChanged_TriggersScanPlugins_AndLeavesIsScanningZero()
     {
         var service = new WindowManagerService();
         var tracker = new DalamudWindowTracker(service);
@@ -1360,8 +1402,13 @@ public class DalamudWindowTrackerTests
         var mockPm = new MockPluginManagerWithEvent();
         tracker.TryHookPluginManagerEvents(mockPm);
 
-        var ex = Record.Exception(() => mockPm.FireInstalledPluginsChanged());
-        Assert.Null(ex);
+        mockPm.FireInstalledPluginsChanged();
+
+        var isScanningField = typeof(DalamudWindowTracker).GetField(
+            "isScanning",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(isScanningField);
+        Assert.Equal(0, (int)isScanningField.GetValue(tracker)!);
     }
 
     [Fact]
@@ -1413,6 +1460,43 @@ public class DalamudWindowTrackerTests
             if (System.IO.File.Exists(iconPath))
                 System.IO.File.Delete(iconPath);
         }
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReAddedAfterUnload_FiresPluginReloaded()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var reloadedFired = 0;
+        tracker.PluginReloaded += () => reloadedFired++;
+
+        var ws1 = new WindowSystem("Sys1");
+        var win1 = new DummyWindow("Win1");
+        ws1.AddWindow(win1);
+        var host1 = new PluginHost(ws1);
+
+        var plugin = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "ReloadPlugin" },
+            instance = host1
+        };
+
+        // First scan - plugin is newly loaded
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(1, reloadedFired);
+
+        // Second scan - plugin unloaded (instance = null)
+        plugin.instance = null;
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(2, reloadedFired);
+
+        // Third scan - plugin loaded again with new host
+        var ws2 = new WindowSystem("Sys2");
+        var win2 = new DummyWindow("Win1");
+        ws2.AddWindow(win2);
+        plugin.instance = new PluginHost(ws2);
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(3, reloadedFired);
     }
 }
 
