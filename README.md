@@ -220,6 +220,6 @@ To load the built `Umbra.WindowManager.dll`:
 | **Right-Click** | Open window | Context menu: **Minimize**, **Close**. |
 | **Right-Click** | Minimized window | Context menu: **Restore**, **Close**. |
 | **Right-Click** | Docked tab group | Context menu: **Select Active Tab**, **Close All Tabs**. |
-| **Title Bar Button** | Any window | Clicks the injected minimize button (`FontAwesomeIcon.WindowMinimize`) to minimize. |
+| **Title Bar Button** | Any window | Clicks the original title bar button to minimize to the toolbar. |
 | **Double-Click Title Bar** | Native ImGui collapse | Intercepted and routed to full window minimize. |
 

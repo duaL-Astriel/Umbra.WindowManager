@@ -161,11 +161,7 @@ public class ImGuiContextMonitor
             // the DockNode pointer reads as null here, so we rely on DockId + DockNodeIsVisible (#25).
             var isDocked = IsWindowDocked(win.DockId, win.DockNodeIsVisible);
 
-            // Continuous injection check: keep the minimize button in sync with dock state. The shared
-            // InjectMinimizeButton routine suppresses the button whenever DockGroupKey is set (populated
-            // below once full node membership is known), so dock-group tabs -- where Dalamud draws the
-            // button inside the client area, colliding with plugin controls (issue #25) -- lose it, while
-            // floating/standalone windows keep it re-injected in case a plugin cleared buttons.
+            // Ensure the window's original collapse/minimize button is enabled and any legacy injected button is removed
             if (tracked.TryGetWindow(out var dalamudWindow))
             {
                 if (dalamudWindow is UmbraWindowAdapter uwa)
@@ -182,10 +178,14 @@ public class ImGuiContextMonitor
                 }
             }
 
-            // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
+            // 1. Native collapse guard: if the original button is clicked to collapse, cancel the collapse and minimize
             if (win.Collapsed)
             {
                 win.Collapsed = false;
+                if (tracked.TryGetWindow(out var w) && w.Collapsed == true)
+                {
+                    w.Collapsed = false;
+                }
                 this.windowManager.Minimize(tracked);
                 continue;
             }
@@ -200,6 +200,11 @@ public class ImGuiContextMonitor
                 if (mousePos.X >= win.Pos.X && mousePos.X <= win.Pos.X + win.Size.X &&
                     mousePos.Y >= win.Pos.Y && mousePos.Y <= win.Pos.Y + titleBarHeight)
                 {
+                    win.Collapsed = false;
+                    if (tracked.TryGetWindow(out var w) && w.Collapsed == true)
+                    {
+                        w.Collapsed = false;
+                    }
                     this.windowManager.Minimize(tracked);
                     continue;
                 }
