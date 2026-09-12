@@ -72,92 +72,42 @@ public class DalamudWindowTracker
 
     public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
     {
-        // Dock-group members (docked together as tabs, e.g. Glamourer + Penumbra) have no usable
-        // per-window title bar: Dalamud draws the button inside the client content area where it collides
-        // with and renders beneath the plugin's own controls (issue #25). Suppress it here -- in the single
-        // shared injection routine -- so the background discovery ticks and fast-track paths agree with the
-        // draw loop instead of re-adding the button it just removed. The window regains its button when it
-        // leaves the group (DockGroupKey cleared). Minimizing is still available from the toolbar widget.
-        if (tracked.DockGroupKey != null)
-        {
-            RemoveMinimizeButton(window);
-            return;
-        }
+        // Remove any legacy injected minimize buttons that may have accumulated
+        RemoveMinimizeButton(window);
 
-        // Overlays and non-interactive windows should not have minimize buttons injected
+        // Dock-group members (docked together as tabs) have no title bar; minimize is handled by the tab bar button
+        if (tracked.DockGroupKey != null)
+            return;
+
+        // Overlays and non-interactive windows should not have minimize enabled
         if (!CanInjectMinimizeButton(window))
             return;
 
-        // Idempotent fast exit: if our button is already injected and present, return immediately
-        if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
-            return;
-
-        // Suppress native ImGui collapse triangle in favor of toolbar minimization
-        window.Flags |= Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse;
-
-        // Clean up any duplicate minimize buttons accumulated across assembly hot-reloads
-        TitleBarButton? existingInList = null;
-        for (var i = window.TitleBarButtons.Count - 1; i >= 0; i--)
-        {
-            var b = window.TitleBarButtons[i];
-            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority == int.MaxValue - 1)
-            {
-                if (existingInList == null)
-                {
-                    existingInList = b;
-                }
-                else
-                {
-                    window.TitleBarButtons.RemoveAt(i);
-                }
-            }
-        }
-
-        if (existingInList != null)
-        {
-            existingInList.Click = _ => service.Minimize(tracked);
-            InjectedButtons.AddOrUpdate(window, existingInList);
-            return;
-        }
+        // Enable the window's original collapse/minimize button by clearing the NoCollapse flag
+        window.Flags &= ~Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse;
 
         // Hook any plugin-provided minimize buttons so clicking them also delegates to WindowManagerService.Minimize
-        for (var i = 0; i < window.TitleBarButtons.Count; i++)
+        if (window.TitleBarButtons != null)
         {
-            var b = window.TitleBarButtons[i];
-            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
+            for (var i = 0; i < window.TitleBarButtons.Count; i++)
             {
-                var origClick = b.Click;
-                b.Click = mb =>
+                var b = window.TitleBarButtons[i];
+                if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
                 {
-                    origClick?.Invoke(mb);
-                    service.Minimize(tracked);
-                };
+                    var origClick = b.Click;
+                    b.Click = mb =>
+                    {
+                        origClick?.Invoke(mb);
+                        service.Minimize(tracked);
+                    };
+                }
             }
         }
-
-        var button = new TitleBarButton
-        {
-            Icon = FontAwesomeIcon.WindowMinimize,
-            Priority = int.MaxValue - 1,
-            Click = _ => service.Minimize(tracked),
-            ShowTooltip = () =>
-            {
-                if (Dalamud.Bindings.ImGui.ImGui.IsItemHovered())
-                    Dalamud.Bindings.ImGui.ImGui.SetTooltip("Minimize to Umbra Toolbar");
-            }
-        };
-
-        window.TitleBarButtons.Add(button);
-        InjectedButtons.AddOrUpdate(window, button);
     }
 
     /// <summary>
-    /// Removes the minimize button we injected into <paramref name="window"/>, if present. Docked windows
-    /// in a multi-tab dock node have no real title bar, so Dalamud renders the injected button inside the
-    /// client content area where it collides with (and is drawn beneath) the plugin's own controls,
-    /// making it visually obscured and unclickable (issue #25). For those windows we drop the raw button
-    /// and rely on the toolbar / context-menu minimize actions instead. The window becomes eligible for
-    /// re-injection via <see cref="InjectMinimizeButton"/> once it undocks.
+    /// Removes any custom minimize button we may have injected into <paramref name="window"/>, if present.
+    /// Also cleans up any legacy injected minimize buttons accumulated across assembly hot-reloads.
     /// </summary>
     public static void RemoveMinimizeButton(IWindow window)
     {
@@ -168,6 +118,15 @@ public class DalamudWindowTracker
         {
             window.TitleBarButtons.Remove(injected);
             InjectedButtons.Remove(window);
+        }
+
+        for (var i = window.TitleBarButtons.Count - 1; i >= 0; i--)
+        {
+            var b = window.TitleBarButtons[i];
+            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority == int.MaxValue - 1)
+            {
+                window.TitleBarButtons.RemoveAt(i);
+            }
         }
     }
 
