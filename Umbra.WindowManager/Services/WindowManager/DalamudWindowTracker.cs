@@ -29,6 +29,18 @@ public class DalamudWindowTracker : IDisposable
     // Dalamud's own logo (UIRes/logo.png under its asset directory), used as the taskbar icon for
     // Dalamud core windows. Null until successfully resolved; resolution is retried on later ticks.
     private byte[]? dalamudCoreIcon;
+
+    // Umbra's own logo (Umbra.images.logo.png embedded in Umbra assembly), used as the taskbar icon for
+    // Umbra core windows. Null until successfully resolved; resolution is retried on later ticks.
+    private byte[]? umbraCoreIcon;
+
+    // Discovered Umbra window adapters keyed by instance ID.
+    private readonly ConcurrentDictionary<string, UmbraWindowAdapter> knownUmbraWindows = new();
+
+    private object? hookedUmbraWindowManager;
+    private Delegate? onUmbraWindowOpenedHandler;
+    private Delegate? onUmbraWindowClosedHandler;
+
     private readonly ConcurrentDictionary<string, byte> pendingDownloads = new();
     private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
@@ -279,6 +291,11 @@ public class DalamudWindowTracker : IDisposable
                 if (diInstance != null)
                     this.ScanDalamudCoreWindows(diInstance, this.TryLoadDalamudCoreIcon(logAssembly, serviceOpenType));
             }
+
+            // Umbra's own internal windows (Settings, Widget Browser, Variable Editor, Toolbar Profile
+            // Manager, Installer) live in Umbra.Windows.WindowManager, not in Dalamud's WindowSystem.
+            // Discover and register them under the synthetic "Umbra" plugin context (issue #44).
+            this.ScanUmbraWindows();
         }
         catch (Exception ex)
         {
@@ -350,6 +367,416 @@ public class DalamudWindowTracker : IDisposable
         finally
         {
             this.currentPluginContext = null;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to resolve <see cref="Umbra.Windows.WindowManager"/> via Umbra's <see cref="Umbra.Common.ServiceContainer"/>
+    /// and scans its active windows under the synthetic "Umbra" plugin context.
+    /// Safely catches any exception outside the game or during startup.
+    /// </summary>
+    internal void ScanUmbraWindows()
+    {
+        try
+        {
+            var scType = typeof(Umbra.Common.ServiceAttribute).Assembly.GetType("Umbra.Common.ServiceContainer");
+            if (scType == null) return;
+
+            object? wmInstance = null;
+            var getMethod = scType.GetMethod("GetInstance", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, [typeof(Type)]);
+            if (getMethod != null)
+            {
+                try
+                {
+                    wmInstance = getMethod.Invoke(null, [typeof(Umbra.Windows.WindowManager)]);
+                }
+                catch
+                {
+                    // Fall through to Instances field fallback
+                }
+            }
+
+            if (wmInstance == null)
+            {
+                var instancesField = scType.GetField("Instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                if (instancesField?.GetValue(null) is IDictionary instancesDict &&
+                    instancesDict.Contains(typeof(Umbra.Windows.WindowManager)))
+                {
+                    wmInstance = instancesDict[typeof(Umbra.Windows.WindowManager)];
+                }
+            }
+
+            if (wmInstance != null)
+            {
+                this.ScanUmbraCoreWindows(wmInstance, this.TryLoadUmbraCoreIcon());
+            }
+        }
+        catch
+        {
+            // Best effort: safe outside the game loop / in unit tests
+        }
+    }
+
+    internal void ScanUmbraCoreWindows(object windowManager)
+        => this.ScanUmbraCoreWindows(windowManager, this.TryLoadUmbraCoreIcon());
+
+    internal void ScanUmbraCoreWindows(object windowManager, byte[]? coreIcon)
+    {
+        this.HookUmbraWindowManagerEvents(windowManager);
+
+        coreIcon ??= this.TryLoadUmbraCoreIcon();
+
+        var dict = GetUmbraInstancesDictionary(windowManager);
+        var activeInstances = ExtractUmbraInstances(windowManager).ToList();
+        var activeKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (instanceId, window) in activeInstances)
+        {
+            activeKeys.Add(instanceId);
+
+            UmbraWindowProxy? proxy = null;
+            if (dict != null)
+            {
+                try
+                {
+                    lock (dict)
+                    {
+                        if (dict.Contains(instanceId))
+                        {
+                            if (dict[instanceId] is UmbraWindowProxy existingProxy)
+                            {
+                                proxy = existingProxy;
+                            }
+                            else
+                            {
+                                proxy = new UmbraWindowProxy(window);
+                                dict[instanceId] = proxy;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best effort
+                }
+            }
+
+            if (this.knownUmbraWindows.TryGetValue(instanceId, out var existingAdapter))
+            {
+                if (ReferenceEquals(existingAdapter.UnderlyingWindow, window))
+                {
+                    var twExisting = this.windowManagerService.RegisterWindow(existingAdapter);
+                    twExisting.PluginInternalName = "Umbra";
+                    if (coreIcon != null) twExisting.IconBytes = coreIcon;
+                    existingAdapter.IsBeingMinimized = () => twExisting.IsMinimized;
+                    if (proxy != null) existingAdapter.Proxy = proxy;
+                    existingAdapter.WindowManager = windowManager;
+                    existingAdapter.HookTitleBarMinimize(this.windowManagerService, twExisting);
+                    if (window.IsMinimized && !twExisting.IsMinimized)
+                    {
+                        this.windowManagerService.Minimize(twExisting);
+                    }
+                    continue;
+                }
+
+                this.windowManagerService.UnregisterWindow(existingAdapter);
+                this.knownUmbraWindows.TryRemove(instanceId, out _);
+            }
+
+            var adapter = new UmbraWindowAdapter(instanceId, window, proxy: proxy, windowManager: windowManager);
+            var tw = this.windowManagerService.RegisterWindow(adapter);
+            tw.PluginInternalName = "Umbra";
+            tw.IconBytes = coreIcon;
+            adapter.IsBeingMinimized = () => tw.IsMinimized;
+            adapter.HookTitleBarMinimize(this.windowManagerService, tw);
+            if (window.IsMinimized && !tw.IsMinimized)
+            {
+                this.windowManagerService.Minimize(tw);
+            }
+            this.knownUmbraWindows[instanceId] = adapter;
+        }
+
+        foreach (var kvp in this.knownUmbraWindows)
+        {
+            if (!activeKeys.Contains(kvp.Key))
+            {
+                if (this.knownUmbraWindows.TryRemove(kvp.Key, out var removed))
+                {
+                    this.windowManagerService.UnregisterWindow(removed);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Loads the embedded Umbra logo (<c>Umbra.images.logo.png</c>) from the Umbra assembly
+    /// for use as the taskbar icon for Umbra core windows. Cached once loaded; returns null
+    /// safely if the resource cannot be loaded.
+    /// </summary>
+    internal byte[]? TryLoadUmbraCoreIcon()
+    {
+        if (this.umbraCoreIcon != null)
+            return this.umbraCoreIcon;
+
+        if (this.iconCache.TryGetValue("Umbra", out var cached) && cached != null)
+        {
+            this.umbraCoreIcon = cached;
+            return cached;
+        }
+
+        try
+        {
+            var asm = Type.GetType("Umbra.Plugin, Umbra")?.Assembly ?? typeof(Umbra.Windows.IWindow).Assembly;
+            using var stream = asm.GetManifestResourceStream("Umbra.images.logo.png");
+            if (stream == null)
+                return null;
+
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            var bytes = ms.ToArray();
+            this.umbraCoreIcon = bytes;
+            this.iconCache["Umbra"] = bytes;
+            return bytes;
+        }
+        catch
+        {
+            // Safe fallback: returns null if resource is missing or throws
+            return null;
+        }
+    }
+
+    internal static IDictionary? GetUmbraInstancesDictionary(object windowManager)
+    {
+        var wmType = windowManager.GetType();
+        var field = wmType.GetField("_instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                 ?? wmType.GetField("Instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        var obj = field?.GetValue(windowManager);
+        if (obj == null)
+        {
+            var prop = wmType.GetProperty("Instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?? wmType.GetProperty("_instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            obj = prop?.GetValue(windowManager);
+        }
+
+        return obj as IDictionary;
+    }
+
+    private static IEnumerable<KeyValuePair<string, Umbra.Windows.IWindow>> ExtractUmbraInstances(object windowManager)
+    {
+        var dict = GetUmbraInstancesDictionary(windowManager);
+        if (dict != null)
+        {
+            var entries = new List<KeyValuePair<string, Umbra.Windows.IWindow>>();
+            try
+            {
+                lock (dict)
+                {
+                    foreach (DictionaryEntry entry in dict)
+                    {
+                        if (entry.Key is string instanceId)
+                        {
+                            if (entry.Value is UmbraWindowProxy proxy)
+                            {
+                                entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, proxy.UnderlyingWindow));
+                            }
+                            else if (entry.Value is Umbra.Windows.IWindow window)
+                            {
+                                entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, window));
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort snapshot in case of concurrent dictionary modification by Umbra
+            }
+
+            return entries;
+        }
+
+        return Enumerable.Empty<KeyValuePair<string, Umbra.Windows.IWindow>>();
+    }
+
+    private void HookUmbraWindowManagerEvents(object windowManager)
+    {
+        lock (this.knownUmbraWindows)
+        {
+            if (ReferenceEquals(this.hookedUmbraWindowManager, windowManager))
+                return;
+
+            if (this.hookedUmbraWindowManager != null)
+                this.UnhookUmbraWindowManagerEvents();
+
+            this.hookedUmbraWindowManager = windowManager;
+
+            try
+            {
+                var wmType = windowManager.GetType();
+                var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (openedEvent != null && openedEvent.EventHandlerType != null)
+                {
+                    var handler = this.CreateUmbraEventHandler(openedEvent.EventHandlerType, this.OnUmbraWindowOpened);
+                    if (handler != null)
+                    {
+                        openedEvent.AddEventHandler(windowManager, handler);
+                        this.onUmbraWindowOpenedHandler = handler;
+                    }
+                }
+
+                var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (closedEvent != null && closedEvent.EventHandlerType != null)
+                {
+                    var handler = this.CreateUmbraEventHandler(closedEvent.EventHandlerType, this.OnUmbraWindowClosed);
+                    if (handler != null)
+                    {
+                        closedEvent.AddEventHandler(windowManager, handler);
+                        this.onUmbraWindowClosedHandler = handler;
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort
+            }
+        }
+    }
+
+    private void UnhookUmbraWindowManagerEvents()
+    {
+        lock (this.knownUmbraWindows)
+        {
+            if (this.hookedUmbraWindowManager == null)
+                return;
+
+            try
+            {
+                var dict = GetUmbraInstancesDictionary(this.hookedUmbraWindowManager);
+                if (dict != null)
+                {
+                    try
+                    {
+                        lock (dict)
+                        {
+                            foreach (var kvp in this.knownUmbraWindows)
+                            {
+                                if (dict.Contains(kvp.Key) && dict[kvp.Key] is UmbraWindowProxy proxy)
+                                {
+                                    dict[kvp.Key] = proxy.UnderlyingWindow;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Best effort
+                    }
+                }
+
+                var wmType = this.hookedUmbraWindowManager.GetType();
+                if (this.onUmbraWindowOpenedHandler != null)
+                {
+                    var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    openedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowOpenedHandler);
+                }
+
+                if (this.onUmbraWindowClosedHandler != null)
+                {
+                    var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    closedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowClosedHandler);
+                }
+            }
+            catch
+            {
+                // Best effort
+            }
+
+            this.hookedUmbraWindowManager = null;
+            this.onUmbraWindowOpenedHandler = null;
+            this.onUmbraWindowClosedHandler = null;
+        }
+    }
+
+    private Delegate? CreateUmbraEventHandler(Type eventHandlerType, Action<object?> callback)
+    {
+        var invoke = eventHandlerType.GetMethod("Invoke");
+        if (invoke == null) return null;
+
+        var parameters = invoke.GetParameters();
+        if (parameters.Length == 0)
+        {
+            Action handler = () => callback(null);
+            return Delegate.CreateDelegate(eventHandlerType, handler.Target, handler.Method);
+        }
+
+        if (parameters.Length == 1)
+        {
+            var paramType = parameters[0].ParameterType;
+            var dispatcher = new UmbraEventDispatcher(callback);
+            var method = typeof(UmbraEventDispatcher)
+                .GetMethod(nameof(UmbraEventDispatcher.Dispatch), BindingFlags.Public | BindingFlags.Instance)!
+                .MakeGenericMethod(paramType);
+            return Delegate.CreateDelegate(eventHandlerType, dispatcher, method);
+        }
+
+        return null;
+    }
+
+    private sealed class UmbraEventDispatcher
+    {
+        private readonly Action<object?> callback;
+
+        public UmbraEventDispatcher(Action<object?> callback)
+        {
+            this.callback = callback;
+        }
+
+        public void Dispatch<T>(T arg)
+        {
+            this.callback(arg);
+        }
+    }
+
+    private void OnUmbraWindowOpened(object? rawWindow)
+    {
+        try
+        {
+            if (this.hookedUmbraWindowManager != null)
+            {
+                this.ScanUmbraCoreWindows(this.hookedUmbraWindowManager, this.TryLoadUmbraCoreIcon());
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    private void OnUmbraWindowClosed(object? rawWindow)
+    {
+        try
+        {
+            if (rawWindow is Umbra.Windows.IWindow window)
+            {
+                var match = this.knownUmbraWindows.FirstOrDefault(kvp => ReferenceEquals(kvp.Value.UnderlyingWindow, window));
+                if (!string.IsNullOrEmpty(match.Key))
+                {
+                    if (this.knownUmbraWindows.TryRemove(match.Key, out var adapter))
+                    {
+                        this.windowManagerService.UnregisterWindow(adapter);
+                    }
+                    return;
+                }
+            }
+
+            if (this.hookedUmbraWindowManager != null)
+            {
+                this.ScanUmbraCoreWindows(this.hookedUmbraWindowManager, this.TryLoadUmbraCoreIcon());
+            }
+        }
+        catch
+        {
+            // Best effort
         }
     }
 
@@ -1056,6 +1483,28 @@ public class DalamudWindowTracker : IDisposable
     {
         if (string.IsNullOrWhiteSpace(windowName)) return null;
 
+        var windowId = WindowInfoHelper.GetWindowId(windowName);
+
+        foreach (var adapter in this.knownUmbraWindows.Values)
+        {
+            if (string.Equals(adapter.WindowName, windowName, StringComparison.Ordinal) ||
+                string.Equals(adapter.InstanceId, windowName, StringComparison.Ordinal) ||
+                (!string.IsNullOrEmpty(windowId) && string.Equals(adapter.InstanceId, windowId, StringComparison.Ordinal)))
+            {
+                var tw = this.windowManagerService.RegisterWindow(adapter);
+                tw.PluginInternalName = "Umbra";
+                var coreIcon = this.TryLoadUmbraCoreIcon();
+                if (coreIcon != null) tw.IconBytes = coreIcon;
+                adapter.IsBeingMinimized = () => tw.IsMinimized;
+                adapter.HookTitleBarMinimize(this.windowManagerService, tw);
+                if (adapter.UnderlyingWindow.IsMinimized && !tw.IsMinimized)
+                {
+                    this.windowManagerService.Minimize(tw);
+                }
+                return tw;
+            }
+        }
+
         foreach (var (ws, context) in this.knownWindowSystems)
         {
             for (var i = 0; i < ws.Windows.Count; i++)
@@ -1085,6 +1534,16 @@ public class DalamudWindowTracker : IDisposable
     public void UntrackPlugin(string internalName)
     {
         if (string.IsNullOrWhiteSpace(internalName)) return;
+
+        if (string.Equals(internalName, "Umbra", StringComparison.OrdinalIgnoreCase))
+        {
+            this.UnhookUmbraWindowManagerEvents();
+            this.knownUmbraWindows.Clear();
+            this.iconCache.TryRemove("Umbra", out _);
+            this.umbraCoreIcon = null;
+            this.windowManagerService.UnregisterWindowsForPlugin("Umbra");
+            return;
+        }
 
         foreach (var (ws, context) in this.knownWindowSystems)
         {
@@ -1359,6 +1818,8 @@ public class DalamudWindowTracker : IDisposable
         }
 
         this.UnhookPluginInterface();
+        this.UnhookUmbraWindowManagerEvents();
+        this.knownUmbraWindows.Clear();
     }
 
 

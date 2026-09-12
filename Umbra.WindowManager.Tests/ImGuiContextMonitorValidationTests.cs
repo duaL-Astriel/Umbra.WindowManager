@@ -1,4 +1,7 @@
+using System.Collections.Generic;
 using System.Numerics;
+using System.Reflection;
+using Dalamud.Interface.Windowing;
 using Umbra.WindowManager.Services.WindowManager;
 using Xunit;
 
@@ -6,6 +9,11 @@ namespace Umbra.WindowManager.Tests;
 
 public class ImGuiContextMonitorValidationTests
 {
+    private class DummyWindow : Window
+    {
+        public DummyWindow(string name) : base(name) { }
+        public override void Draw() { }
+    }
     [Theory]
     [InlineData(100f, 100f, true)]
     [InlineData(1f, 1f, true)]
@@ -125,6 +133,95 @@ public class ImGuiContextMonitorValidationTests
         action();
 
         Assert.Empty(unmanagedSet);
+    }
+
+    [Fact]
+    public void PopulateTrackedMap_IndexesBothWindowNameAndId()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var windowWithId = new DummyWindow("Settings###UmbraSettings") { IsOpen = true };
+        service.RegisterWindow(windowWithId);
+
+        monitor.PopulateTrackedMap();
+
+        var trackedMapField = typeof(ImGuiContextMonitor).GetField(
+            "trackedMap",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(trackedMapField);
+
+        var trackedMap = (Dictionary<string, TrackedWindow>)trackedMapField.GetValue(monitor)!;
+
+        // WindowName key must be present
+        Assert.True(trackedMap.ContainsKey("Settings###UmbraSettings"));
+        // Id key must also be present (allows ImGui raw name "UmbraSettings" to match)
+        Assert.True(trackedMap.ContainsKey("UmbraSettings"));
+        // Both keys must point to the same TrackedWindow instance
+        Assert.Same(trackedMap["Settings###UmbraSettings"], trackedMap["UmbraSettings"]);
+        Assert.Equal("UmbraSettings", trackedMap["UmbraSettings"].Id);
+
+        // Direct method lookup via TryGetTrackedWindow
+        Assert.True(monitor.TryGetTrackedWindow("Settings###UmbraSettings", out var trackedByName));
+        Assert.True(monitor.TryGetTrackedWindow("UmbraSettings", out var trackedById));
+        Assert.Same(trackedByName, trackedById);
+    }
+
+    [Fact]
+    public void PopulateTrackedMap_WindowWithoutDistinctId_IndexesWindowName()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var normalWindow = new DummyWindow("StandardWindow") { IsOpen = true };
+        service.RegisterWindow(normalWindow);
+
+        monitor.PopulateTrackedMap();
+
+        Assert.True(monitor.TryGetTrackedWindow("StandardWindow", out var tracked));
+        Assert.NotNull(tracked);
+        Assert.Equal("StandardWindow", tracked.WindowName);
+    }
+
+    [Fact]
+    public void UpdateUnseenFrames_WhenIdMatchedWindowIsObserved_UnseenFramesRemainsZero()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var windowWithId = new DummyWindow("Settings###UmbraSettings") { IsOpen = true };
+        var tw = service.RegisterWindow(windowWithId);
+
+        monitor.PopulateTrackedMap();
+
+        var seenWindowsField = typeof(ImGuiContextMonitor).GetField(
+            "seenWindows",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        Assert.NotNull(seenWindowsField);
+
+        var seenWindows = (HashSet<string>)seenWindowsField.GetValue(monitor)!;
+
+        // Simulate observing the window by its bare ID (e.g. "UmbraSettings")
+        seenWindows.Add("UmbraSettings");
+
+        Assert.Equal(0, tw.UnseenFrames);
+
+        monitor.UpdateUnseenFrames();
+
+        // tw.UnseenFrames should remain 0 because bare ID matched in seenWindows
+        Assert.Equal(0, tw.UnseenFrames);
+    }
+
+    [Fact]
+    public void UpdateUnseenFrames_WhenUnobserved_IncrementsUnseenFrames()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var windowWithId = new DummyWindow("Settings###UmbraSettings") { IsOpen = true };
+        var tw = service.RegisterWindow(windowWithId);
+
+        monitor.PopulateTrackedMap();
+
+        monitor.UpdateUnseenFrames();
+
+        Assert.Equal(1, tw.UnseenFrames);
     }
 }
 
