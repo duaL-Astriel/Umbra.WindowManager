@@ -9,7 +9,7 @@ namespace Umbra.WindowManager.Tests;
 
 public class DalamudWindowTrackerTests
 {
-    private class DummyWindow : Window
+    public class DummyWindow : Window
     {
         public DummyWindow(string name) : base(name) { }
         public override void Draw() { }
@@ -1138,4 +1138,163 @@ public class DalamudWindowTrackerTests
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "Penumbra.Gui.MainWindow");
     }
+
+    public static class MockAutoHookService
+    {
+        public static WindowSystem WindowSystem { get; set; } = null!;
+    }
+
+    public class MockAutoHookPlugin
+    {
+        private static DummyWindow _pluginUi = null!;
+        private static DummyWindow _autoGig = null!;
+
+        public MockAutoHookPlugin(DummyWindow ui, DummyWindow gig)
+        {
+            _pluginUi = ui;
+            _autoGig = gig;
+        }
+    }
+
+    private class MockUiBuilder
+    {
+#pragma warning disable CS0067
+        public event System.Action? Draw;
+        public event System.Action? OpenConfigUi;
+        public event System.Action? OpenMainUi;
+#pragma warning restore CS0067
+    }
+
+    private class MockPluginInterface
+    {
+        public MockUiBuilder UiBuilder { get; }
+
+        public MockPluginInterface(MockUiBuilder uiBuilder)
+        {
+            this.UiBuilder = uiBuilder;
+        }
+    }
+
+    private class MockLocalPluginWithUi
+    {
+        public MockPluginInterface DalamudInterface { get; }
+
+        public MockLocalPluginWithUi(MockPluginInterface di)
+        {
+            this.DalamudInterface = di;
+        }
+    }
+
+    [Fact]
+    public void ScanObjectForWindowSystems_DiscoversStaticWindowFields_OnPluginType()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var uiWin = new DummyWindow("AutoHook 2.5.0.0###MainAutoHook");
+        var gigWin = new DummyWindow("SpearfishingHelper") { Flags = ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoInputs };
+        var plugin = new MockAutoHookPlugin(uiWin, gigWin);
+
+        var scanMethod = typeof(DalamudWindowTracker).GetMethod(
+            "ScanObjectForWindowSystems",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(scanMethod);
+
+        scanMethod.Invoke(tracker, new object[] { plugin });
+
+        var tracked = service.GetTrackedWindows();
+        Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+        Assert.Single(uiWin.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, uiWin.TitleBarButtons.First().Icon);
+    }
+
+    [Fact]
+    public void ScanPluginAssembly_DiscoversStaticWindowSystem_OnServiceHolderClass()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("AutoHook");
+        var uiWin = new DummyWindow("AutoHook 2.5.0.0###MainAutoHook");
+        ws.AddWindow(uiWin);
+        MockAutoHookService.WindowSystem = ws;
+
+        var scanMethod = typeof(DalamudWindowTracker).GetMethod(
+            "ScanPluginAssembly",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+        Assert.NotNull(scanMethod);
+
+        scanMethod.Invoke(tracker, new object[] { typeof(MockAutoHookService).Assembly });
+
+        var tracked = service.GetTrackedWindows();
+        Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+        Assert.Single(uiWin.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, uiWin.TitleBarButtons.First().Icon);
+    }
+
+    [Fact]
+    public void ScanLocalPluginUiBuilder_DiscoversWindowSystem_FromDrawEventDelegate()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("AutoHookUiBuilder");
+        var uiWin = new DummyWindow("AutoHook 2.5.0.0###MainAutoHook");
+        ws.AddWindow(uiWin);
+
+        var uiBuilder = new MockUiBuilder();
+        uiBuilder.Draw += ws.Draw;
+
+        var localPlugin = new MockLocalPluginWithUi(new MockPluginInterface(uiBuilder));
+
+        var scanMethod = typeof(DalamudWindowTracker).GetMethod(
+            "ScanLocalPluginUiBuilder",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+        Assert.NotNull(scanMethod);
+
+        scanMethod.Invoke(tracker, new object[] { localPlugin });
+
+        var tracked = service.GetTrackedWindows();
+        Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+        Assert.Single(uiWin.TitleBarButtons);
+        Assert.Equal(FontAwesomeIcon.WindowMinimize, uiWin.TitleBarButtons.First().Icon);
+    }
+
+    [Fact]
+    public void AutoHookArchitecture_MinimizingAndRestoring_WorksCleanly()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("AutoHook");
+        var uiWin = new DummyWindow("AutoHook 2.5.0.0###MainAutoHook") { IsOpen = true };
+        ws.AddWindow(uiWin);
+        MockAutoHookService.WindowSystem = ws;
+
+        tracker.TrackWindowSystem(ws, "AutoHook", new byte[] { 1, 2, 3 });
+
+        var tracked = service.GetTrackedWindows().Single(t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+        Assert.True(tracked.IsOpen);
+        Assert.False(tracked.IsMinimized);
+        Assert.True(tracked.IsManageable);
+
+        // Minimize via injected button click
+        var minBtn = uiWin.TitleBarButtons.Single(b => b.Icon == FontAwesomeIcon.WindowMinimize);
+        minBtn.Click?.Invoke(ImGuiMouseButton.Left);
+
+        Assert.True(tracked.IsMinimized);
+        Assert.False(uiWin.IsOpen);
+        Assert.False(tracked.IsOpen);
+        Assert.True(tracked.IsManageable); // Minimized window remains manageable to stay in toolbar
+
+        var visibleAndMinimized = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(visibleAndMinimized, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+
+        // Restore via service
+        service.Restore(tracked);
+        Assert.False(tracked.IsMinimized);
+        Assert.True(uiWin.IsOpen);
+        Assert.True(tracked.IsOpen);
+    }
 }
+
