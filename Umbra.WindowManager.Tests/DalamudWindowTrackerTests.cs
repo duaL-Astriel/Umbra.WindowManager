@@ -1508,6 +1508,7 @@ public class DalamudWindowTrackerTests
         public bool IsFocused { get; set; }
         public bool IsHovered { get; set; }
         public bool CloseCalled { get; private set; }
+        public int RenderCallCount { get; private set; }
 
         public event Action? RequestClose;
 
@@ -1518,7 +1519,11 @@ public class DalamudWindowTrackerTests
             this.RequestClose?.Invoke();
         }
 
-        public void Render(string instanceId) { }
+        public void Render(string instanceId)
+        {
+            this.RenderCallCount++;
+        }
+
         public void Dispose() { }
     }
 
@@ -1601,6 +1606,9 @@ public class DalamudWindowTrackerTests
 
         Assert.True(mockWindow.IsMinimized);
         Assert.False(mockWindow.CloseCalled);
+        Assert.NotNull(adapter.Proxy);
+        Assert.True(adapter.Proxy.IsHidden);
+        Assert.False(adapter.IsOpen);
     }
 
     [Fact]
@@ -1672,6 +1680,151 @@ public class DalamudWindowTrackerTests
 
         var ex = Record.Exception(() => tracker.ScanUmbraWindows());
         Assert.Null(ex);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_InstallsProxyInInstancesDictionary()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        Assert.True(fakeWm._instances.ContainsKey("UmbraSettings"));
+        Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        var proxy = (UmbraWindowProxy)fakeWm._instances["UmbraSettings"];
+        Assert.Same(mockWindow, proxy.UnderlyingWindow);
+    }
+
+    [Fact]
+    public void ScanUmbra_MinimizingAndRestoring_SuppressesAndResumesRenderingViaProxy()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        var tw = service.GetTrackedWindows().Single();
+        Assert.True(tw.TryGetWindow(out var win));
+        var adapter = (UmbraWindowAdapter)win;
+
+        // When minimized:
+        service.Minimize(tw);
+        Assert.True(tw.IsMinimized);
+        Assert.False(adapter.IsOpen);
+
+        var proxy = Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        Assert.True(proxy.IsHidden);
+
+        // Umbra's OnDraw calls Render on the instance in _instances
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(0, mockWindow.RenderCallCount);
+
+        // When restored:
+        service.Restore(tw);
+        Assert.False(tw.IsMinimized);
+        Assert.True(adapter.IsOpen);
+        Assert.False(proxy.IsHidden);
+
+        // Umbra's OnDraw calls Render on the instance in _instances again
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(1, mockWindow.RenderCallCount);
+    }
+
+    [Fact]
+    public void ScanUmbra_UntrackPlugin_Umbra_RestoresRawWindowInInstancesDictionary()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+        Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+
+        tracker.UntrackPlugin("Umbra");
+
+        // Proxy must be unwrapped back to raw window
+        Assert.Same(mockWindow, fakeWm._instances["UmbraSettings"]);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_WhenWindowIsMinimized_MinimizesTrackedWindowAndHidesProxy()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow { IsMinimized = true };
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        var tw = service.GetTrackedWindows().Single();
+        Assert.True(tw.IsMinimized);
+        Assert.False(tw.IsOpen);
+
+        var proxy = Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        Assert.True(proxy.IsHidden);
+
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(0, mockWindow.RenderCallCount);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_ExistingWindowBecomesMinimized_MinimizesTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow { IsMinimized = false };
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        // Initial scan: window is open and unminimized
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+        var tw = service.GetTrackedWindows().Single();
+        Assert.False(tw.IsMinimized);
+
+        // User clicks title bar minimize button on Umbra window
+        mockWindow.IsMinimized = true;
+
+        // Next scan tick reconciles native minimize
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        Assert.True(tw.IsMinimized);
+        Assert.False(tw.IsOpen);
+
+        var proxy = Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        Assert.True(proxy.IsHidden);
+
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(0, mockWindow.RenderCallCount);
+    }
+
+    [Fact]
+    public void ScanUmbra_TryFastTrackWindow_WhenWindowIsMinimized_MinimizesTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow { IsMinimized = false };
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        // Umbra title bar minimizes window
+        mockWindow.IsMinimized = true;
+
+        var tw = tracker.TryFastTrackWindow("UmbraSettings");
+        Assert.NotNull(tw);
+        Assert.True(tw.IsMinimized);
+        Assert.False(tw.IsOpen);
     }
 }
 

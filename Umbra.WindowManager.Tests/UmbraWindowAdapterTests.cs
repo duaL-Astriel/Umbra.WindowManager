@@ -19,6 +19,8 @@ public class UmbraWindowAdapterTests
         public bool IsFocused { get; set; }
         public bool IsHovered { get; set; }
         public bool CloseCalled { get; private set; }
+        public int RenderCallCount { get; private set; }
+        public bool DisposeCalled { get; private set; }
 
         public event Action? RequestClose;
 
@@ -29,9 +31,15 @@ public class UmbraWindowAdapterTests
             this.RequestClose?.Invoke();
         }
 
-        public void Render(string instanceId) { }
+        public void Render(string instanceId)
+        {
+            this.RenderCallCount++;
+        }
 
-        public void Dispose() { }
+        public void Dispose()
+        {
+            this.DisposeCalled = true;
+        }
     }
 
     private class ConcreteTestWindow : Window
@@ -326,5 +334,152 @@ public class UmbraWindowAdapterTests
         adapter.OnClose();
         adapter.OnSafeToRemove();
         adapter.Update();
+    }
+
+    [Fact]
+    public void Proxy_Render_WhenNotHidden_InvokesUnderlyingRender()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock);
+
+        proxy.Render("TestInstance");
+
+        Assert.Equal(1, mock.RenderCallCount);
+    }
+
+    [Fact]
+    public void Proxy_Render_WhenHidden_SuppressesUnderlyingRender()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock) { IsHidden = true };
+
+        proxy.Render("TestInstance");
+
+        Assert.Equal(0, mock.RenderCallCount);
+    }
+
+    [Fact]
+    public void Proxy_Properties_WhenHidden_ReflectHiddenState()
+    {
+        var mock = new MockUmbraWindow
+        {
+            Position = new Vector2(50, 60),
+            Size = new Vector2(300, 200),
+            IsClosed = false,
+            IsMinimized = false,
+            IsFocused = true,
+            IsHovered = true
+        };
+        var proxy = new UmbraWindowProxy(mock) { IsHidden = true };
+
+        Assert.Equal(new Vector2(50, 60), proxy.Position);
+        Assert.Equal(Vector2.Zero, proxy.Size);
+        Assert.True(proxy.IsClosed);
+        Assert.True(proxy.IsMinimized);
+        Assert.False(proxy.IsFocused);
+        Assert.False(proxy.IsHovered);
+        Assert.Same(mock, proxy.UnderlyingWindow);
+    }
+
+    [Fact]
+    public void Proxy_CloseAndDispose_ForwardToUnderlyingWindow()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock);
+        var requestCloseFired = false;
+        proxy.RequestClose += () => requestCloseFired = true;
+
+        proxy.Close();
+        Assert.True(mock.CloseCalled);
+        Assert.True(requestCloseFired);
+
+        proxy.Dispose();
+        Assert.True(mock.DisposeCalled);
+    }
+
+    [Fact]
+    public void Adapter_IsOpen_False_WhenBeingMinimized_WithProxy_HidesProxyAndSuppressesRender()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock);
+        var isMinimizing = false;
+        var adapter = new UmbraWindowAdapter("TestWindow", mock, "Test", isBeingMinimized: () => isMinimizing, proxy: proxy);
+
+        isMinimizing = true;
+        adapter.IsOpen = false;
+
+        Assert.True(proxy.IsHidden);
+        Assert.False(adapter.IsOpen);
+        Assert.True(mock.IsMinimized);
+        Assert.False(mock.CloseCalled);
+
+        // Rendering through proxy must be suppressed
+        proxy.Render("TestWindow");
+        Assert.Equal(0, mock.RenderCallCount);
+    }
+
+    [Fact]
+    public void Adapter_IsOpen_True_WithProxy_RestoresProxyAndPermitsRender()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock) { IsHidden = true };
+        var adapter = new UmbraWindowAdapter("TestWindow", mock, "Test", proxy: proxy);
+
+        adapter.IsOpen = true;
+
+        Assert.False(proxy.IsHidden);
+        Assert.True(adapter.IsOpen);
+        Assert.False(mock.IsMinimized);
+        Assert.False(mock.IsClosed);
+
+        // Rendering through proxy must be allowed now
+        proxy.Render("TestWindow");
+        Assert.Equal(1, mock.RenderCallCount);
+    }
+
+    [Fact]
+    public void Adapter_BringToFront_WithProxy_ClearsProxyIsHidden()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock) { IsHidden = true };
+        var adapter = new UmbraWindowAdapter("TestWindow", mock, "Test", proxy: proxy);
+
+        adapter.BringToFront();
+
+        Assert.False(proxy.IsHidden);
+        Assert.True(mock.IsFocused);
+    }
+
+    [Fact]
+    public void HookTitleBarMinimize_GracefullyHandlesMockWithoutWindowNode()
+    {
+        var mock = new MockUmbraWindow();
+        var proxy = new UmbraWindowProxy(mock);
+        var adapter = new UmbraWindowAdapter("TestWindow", mock, "Test", proxy: proxy);
+        var service = new WindowManagerService();
+        var tracked = service.RegisterWindow(adapter);
+
+        // Should not throw even though MockUmbraWindow has no WindowNode property
+        var exception = Record.Exception(() => adapter.HookTitleBarMinimize(service, tracked));
+        Assert.Null(exception);
+    }
+
+    [Fact]
+    public void HookTitleBarMinimize_SynchronizesNativeMinimizeState()
+    {
+        var mock = new MockUmbraWindow { IsMinimized = true };
+        var proxy = new UmbraWindowProxy(mock);
+        var adapter = new UmbraWindowAdapter("TestWindow", mock, "Test", proxy: proxy);
+        var service = new WindowManagerService();
+        var tracked = service.RegisterWindow(adapter);
+        adapter.IsBeingMinimized = () => tracked.IsMinimized;
+
+        Assert.False(tracked.IsMinimized);
+
+        adapter.HookTitleBarMinimize(service, tracked);
+
+        Assert.True(tracked.IsMinimized);
+        Assert.False(adapter.IsOpen);
+        Assert.True(proxy.IsHidden);
     }
 }

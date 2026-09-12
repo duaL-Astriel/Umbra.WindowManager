@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Reflection;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface.Windowing;
+using Una.Drawing;
 
 namespace Umbra.WindowManager.Services.WindowManager;
 
@@ -22,11 +23,24 @@ public class UmbraWindowAdapter : IWindow
     /// </summary>
     public Func<bool>? IsBeingMinimized { get; set; }
 
+    /// <summary>
+    /// Optional render proxy wrapping the underlying Umbra window inside Umbra's WindowManager.
+    /// When set, minimizing suppresses Render calls on this proxy to hide the window from display.
+    /// </summary>
+    public UmbraWindowProxy? Proxy { get; set; }
+
+    /// <summary>
+    /// Optional reference to Umbra's WindowManager instance, used for clearing screen clip rects on minimize.
+    /// </summary>
+    public object? WindowManager { get; set; }
+
     public UmbraWindowAdapter(
         string instanceId,
         Umbra.Windows.IWindow umbraWindow,
         string? title = null,
-        Func<bool>? isBeingMinimized = null)
+        Func<bool>? isBeingMinimized = null,
+        UmbraWindowProxy? proxy = null,
+        object? windowManager = null)
     {
         ArgumentNullException.ThrowIfNull(instanceId);
         ArgumentNullException.ThrowIfNull(umbraWindow);
@@ -34,6 +48,8 @@ public class UmbraWindowAdapter : IWindow
         this.InstanceId = instanceId;
         this.umbraWindow = umbraWindow;
         this.IsBeingMinimized = isBeingMinimized;
+        this.Proxy = proxy;
+        this.WindowManager = windowManager;
 
         var effectiveTitle = title != null
             ? (!string.IsNullOrWhiteSpace(title) ? title : null)
@@ -87,22 +103,39 @@ public class UmbraWindowAdapter : IWindow
 
     public bool IsOpen
     {
-        get => !this.umbraWindow.IsClosed && !this.umbraWindow.IsMinimized;
+        get => !this.umbraWindow.IsClosed && !(this.Proxy?.IsHidden ?? this.umbraWindow.IsMinimized);
         set
         {
             if (value)
             {
+                if (this.Proxy != null)
+                {
+                    this.Proxy.IsHidden = false;
+                }
+
                 SetMemberValue(this.umbraWindow, nameof(Umbra.Windows.IWindow.IsMinimized), false);
                 SetMemberValue(this.umbraWindow, nameof(Umbra.Windows.IWindow.IsClosed), false);
+                UncollapseWindowNode();
             }
             else
             {
                 if (this.IsBeingMinimized?.Invoke() == true)
                 {
+                    if (this.Proxy != null)
+                    {
+                        this.Proxy.IsHidden = true;
+                    }
+
                     SetMemberValue(this.umbraWindow, nameof(Umbra.Windows.IWindow.IsMinimized), true);
+                    TryRemoveClipRect(this.WindowManager, this.InstanceId);
                 }
                 else
                 {
+                    if (this.Proxy != null)
+                    {
+                        this.Proxy.IsHidden = false;
+                    }
+
                     this.umbraWindow.Close();
                 }
             }
@@ -171,6 +204,12 @@ public class UmbraWindowAdapter : IWindow
 
     public void BringToFront()
     {
+        if (this.Proxy != null)
+        {
+            this.Proxy.IsHidden = false;
+        }
+
+        UncollapseWindowNode();
         SetMemberValue(this.umbraWindow, nameof(Umbra.Windows.IWindow.IsFocused), true);
     }
 
@@ -259,6 +298,95 @@ public class UmbraWindowAdapter : IWindow
                     }
                 }
             }
+        }
+    }
+
+    private object? hookedWindowNode;
+
+    /// <summary>
+    /// Hooks the title bar collapse/minimize button on Umbra's custom window chrome (<c>WindowNode</c>),
+    /// redirecting title bar clicks to <see cref="WindowManagerService.Minimize(TrackedWindow)"/>
+    /// and canceling Umbra's default collapse-to-titlebar behavior.
+    /// </summary>
+    public void HookTitleBarMinimize(WindowManagerService service, TrackedWindow tracked)
+    {
+        if (service == null || tracked == null) return;
+
+        try
+        {
+            if (this.umbraWindow.IsMinimized && !tracked.IsMinimized)
+            {
+                service.Minimize(tracked);
+            }
+
+            for (var t = this.umbraWindow.GetType(); t != null && t != typeof(object); t = t.BaseType)
+            {
+                var prop = t.GetProperty("WindowNode", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                if (prop?.GetValue(this.umbraWindow) is Node windowNode)
+                {
+                    if (ReferenceEquals(this.hookedWindowNode, windowNode))
+                    {
+                        break;
+                    }
+
+                    var collapseBtn = windowNode.QuerySelector(".button.collapse");
+                    if (collapseBtn != null)
+                    {
+                        collapseBtn.OnMouseUp += node =>
+                        {
+                            node.CancelEvent = true;
+                            service.Minimize(tracked);
+                        };
+                        this.hookedWindowNode = windowNode;
+                    }
+
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort: safe if Una.Drawing is uninitialized or in unit tests
+        }
+    }
+
+    private void UncollapseWindowNode()
+    {
+        try
+        {
+            for (var t = this.umbraWindow.GetType(); t != null && t != typeof(object); t = t.BaseType)
+            {
+                var prop = t.GetProperty("WindowNode", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                if (prop?.GetValue(this.umbraWindow) is Node windowNode)
+                {
+                    windowNode.ToggleClass("collapsed", false);
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    private static void TryRemoveClipRect(object? windowManager, string instanceId)
+    {
+        if (windowManager == null || string.IsNullOrWhiteSpace(instanceId)) return;
+        try
+        {
+            var wmType = windowManager.GetType();
+            var field = wmType.GetField("<delvClipRects>P", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var clipRects = field?.GetValue(windowManager);
+            if (clipRects != null)
+            {
+                var removeMethod = clipRects.GetType().GetMethod("RemoveClipRect", [typeof(string)]);
+                removeMethod?.Invoke(clipRects, [$"Umbra.Window.{instanceId}"]);
+            }
+        }
+        catch
+        {
+            // Best effort
         }
     }
 }

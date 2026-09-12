@@ -426,12 +426,40 @@ public class DalamudWindowTracker : IDisposable
 
         coreIcon ??= this.TryLoadUmbraCoreIcon();
 
+        var dict = GetUmbraInstancesDictionary(windowManager);
         var activeInstances = ExtractUmbraInstances(windowManager).ToList();
         var activeKeys = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var (instanceId, window) in activeInstances)
         {
             activeKeys.Add(instanceId);
+
+            UmbraWindowProxy? proxy = null;
+            if (dict != null)
+            {
+                try
+                {
+                    lock (dict)
+                    {
+                        if (dict.Contains(instanceId))
+                        {
+                            if (dict[instanceId] is UmbraWindowProxy existingProxy)
+                            {
+                                proxy = existingProxy;
+                            }
+                            else
+                            {
+                                proxy = new UmbraWindowProxy(window);
+                                dict[instanceId] = proxy;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best effort
+                }
+            }
 
             if (this.knownUmbraWindows.TryGetValue(instanceId, out var existingAdapter))
             {
@@ -441,6 +469,13 @@ public class DalamudWindowTracker : IDisposable
                     twExisting.PluginInternalName = "Umbra";
                     if (coreIcon != null) twExisting.IconBytes = coreIcon;
                     existingAdapter.IsBeingMinimized = () => twExisting.IsMinimized;
+                    if (proxy != null) existingAdapter.Proxy = proxy;
+                    existingAdapter.WindowManager = windowManager;
+                    existingAdapter.HookTitleBarMinimize(this.windowManagerService, twExisting);
+                    if (window.IsMinimized && !twExisting.IsMinimized)
+                    {
+                        this.windowManagerService.Minimize(twExisting);
+                    }
                     continue;
                 }
 
@@ -448,11 +483,16 @@ public class DalamudWindowTracker : IDisposable
                 this.knownUmbraWindows.TryRemove(instanceId, out _);
             }
 
-            var adapter = new UmbraWindowAdapter(instanceId, window);
+            var adapter = new UmbraWindowAdapter(instanceId, window, proxy: proxy, windowManager: windowManager);
             var tw = this.windowManagerService.RegisterWindow(adapter);
             tw.PluginInternalName = "Umbra";
             tw.IconBytes = coreIcon;
             adapter.IsBeingMinimized = () => tw.IsMinimized;
+            adapter.HookTitleBarMinimize(this.windowManagerService, tw);
+            if (window.IsMinimized && !tw.IsMinimized)
+            {
+                this.windowManagerService.Minimize(tw);
+            }
             this.knownUmbraWindows[instanceId] = adapter;
         }
 
@@ -505,7 +545,7 @@ public class DalamudWindowTracker : IDisposable
         }
     }
 
-    private static IEnumerable<KeyValuePair<string, Umbra.Windows.IWindow>> ExtractUmbraInstances(object windowManager)
+    internal static IDictionary? GetUmbraInstancesDictionary(object windowManager)
     {
         var wmType = windowManager.GetType();
         var field = wmType.GetField("_instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
@@ -518,16 +558,32 @@ public class DalamudWindowTracker : IDisposable
             obj = prop?.GetValue(windowManager);
         }
 
-        if (obj is IDictionary dict)
+        return obj as IDictionary;
+    }
+
+    private static IEnumerable<KeyValuePair<string, Umbra.Windows.IWindow>> ExtractUmbraInstances(object windowManager)
+    {
+        var dict = GetUmbraInstancesDictionary(windowManager);
+        if (dict != null)
         {
             var entries = new List<KeyValuePair<string, Umbra.Windows.IWindow>>();
             try
             {
-                foreach (DictionaryEntry entry in dict)
+                lock (dict)
                 {
-                    if (entry.Key is string instanceId && entry.Value is Umbra.Windows.IWindow window)
+                    foreach (DictionaryEntry entry in dict)
                     {
-                        entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, window));
+                        if (entry.Key is string instanceId)
+                        {
+                            if (entry.Value is UmbraWindowProxy proxy)
+                            {
+                                entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, proxy.UnderlyingWindow));
+                            }
+                            else if (entry.Value is Umbra.Windows.IWindow window)
+                            {
+                                entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, window));
+                            }
+                        }
                     }
                 }
             }
@@ -595,6 +651,28 @@ public class DalamudWindowTracker : IDisposable
 
             try
             {
+                var dict = GetUmbraInstancesDictionary(this.hookedUmbraWindowManager);
+                if (dict != null)
+                {
+                    try
+                    {
+                        lock (dict)
+                        {
+                            foreach (var kvp in this.knownUmbraWindows)
+                            {
+                                if (dict.Contains(kvp.Key) && dict[kvp.Key] is UmbraWindowProxy proxy)
+                                {
+                                    dict[kvp.Key] = proxy.UnderlyingWindow;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Best effort
+                    }
+                }
+
                 var wmType = this.hookedUmbraWindowManager.GetType();
                 if (this.onUmbraWindowOpenedHandler != null)
                 {
@@ -1418,6 +1496,11 @@ public class DalamudWindowTracker : IDisposable
                 var coreIcon = this.TryLoadUmbraCoreIcon();
                 if (coreIcon != null) tw.IconBytes = coreIcon;
                 adapter.IsBeingMinimized = () => tw.IsMinimized;
+                adapter.HookTitleBarMinimize(this.windowManagerService, tw);
+                if (adapter.UnderlyingWindow.IsMinimized && !tw.IsMinimized)
+                {
+                    this.windowManagerService.Minimize(tw);
+                }
                 return tw;
             }
         }

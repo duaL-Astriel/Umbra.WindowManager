@@ -168,7 +168,18 @@ public class ImGuiContextMonitor
             // floating/standalone windows keep it re-injected in case a plugin cleared buttons.
             if (tracked.TryGetWindow(out var dalamudWindow))
             {
-                DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
+                if (dalamudWindow is UmbraWindowAdapter uwa)
+                {
+                    uwa.HookTitleBarMinimize(this.windowManager, tracked);
+                    if (uwa.UnderlyingWindow.IsMinimized && !tracked.IsMinimized)
+                    {
+                        this.windowManager.Minimize(tracked);
+                    }
+                }
+                else
+                {
+                    DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
+                }
             }
 
             // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
