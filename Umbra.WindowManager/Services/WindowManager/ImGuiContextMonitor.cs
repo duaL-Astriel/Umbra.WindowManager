@@ -12,15 +12,39 @@ public class ImGuiContextMonitor
 {
     private readonly WindowManagerService windowManager;
     private readonly DalamudWindowTracker? windowTracker;
-    private readonly Dictionary<string, TrackedWindow> trackedMap = new();
+    // StringComparer.Ordinal (rather than the default comparer, which compares identically) is required for
+    // GetAlternateLookup<ReadOnlySpan<char>>, which lets the draw loop probe these by span instead of
+    // materialising a string for every ImGui window every frame -- see DecodeWindowName (issue #51).
+    private readonly Dictionary<string, TrackedWindow> trackedMap = new(StringComparer.Ordinal);
     private readonly Dictionary<uint, List<TrackedWindow>> dockGroups = new();
     private readonly Dictionary<uint, string> dockActiveTab = new();
     private readonly Dictionary<uint, string> dockKeyCache = new();
     private readonly List<List<TrackedWindow>> listPool = new();
     private readonly List<TrackedWindow> trackedBuffer = [];
     private readonly HashSet<string> seenWindows = [];
-    private readonly HashSet<string> unmanagedWindowNames = [];
-    private int unmanagedClearCounter;
+    private readonly HashSet<string> unmanagedWindowNames = new(StringComparer.Ordinal);
+
+    // Scratch buffer for decoding ImGui's UTF-8 window names; grown on demand and reused every frame.
+    private char[] nameBuffer = new char[256];
+
+    // Registration generation the unmanaged cache was last validated against. -1 forces a clear on the
+    // first frame, matching the old counter starting at 0.
+    private int lastRegistrationGeneration = -1;
+
+    // Frame index of the last clear, used only to bound how often a clear can happen. See ShouldClearUnmanagedCache.
+    // Seeded one full gap in the past (not int.MinValue, whose subtraction would overflow to a negative
+    // difference and suppress every clear) so the first generation change is free to clear immediately.
+    private int frameCounter;
+    private int lastClearFrame = -MinFramesBetweenUnmanagedClears;
+
+    /// <summary>Minimum frames between two generation-driven clears of <see cref="unmanagedWindowNames"/>.</summary>
+    internal const int MinFramesBetweenUnmanagedClears = 10;
+
+    /// <summary>
+    /// Hard ceiling on the negative cache. Window names are unbounded in principle (ImGui popups and tooltips
+    /// synthesize ids), and the cache is no longer flushed on a timer, so it needs its own bound.
+    /// </summary>
+    internal const int MaxUnmanagedWindowNames = 4096;
 
     // Where a soft-hidden raw window is parked. Far off any real viewport; re-applied every frame with
     // ImGuiCond.Always so a cooperative plugin's own SetWindowPos is the only thing that can override it.
@@ -39,11 +63,48 @@ public class ImGuiContextMonitor
 
     /// <summary>
     /// Clears the cache of unmanaged window names so newly opened or updated plugin windows are
-    /// immediately re-evaluated against known window systems without waiting for the periodic 60-frame cycle.
+    /// immediately re-evaluated against known window systems.
     /// </summary>
     public void ClearUnmanagedCache()
     {
         this.unmanagedWindowNames.Clear();
+    }
+
+    /// <summary>
+    /// Decides whether the negative cache of unmanaged window names should be dropped this frame.
+    /// <para>
+    /// It used to be flushed every 60 frames unconditionally, which made every non-managed ImGui window
+    /// re-run <see cref="DalamudWindowTracker.TryFastTrackWindow"/> on one frame -- a 12-18 ms hitch roughly
+    /// once a second (issue #51). Nothing about that timer was load-bearing: a name can only stop being
+    /// unmanageable when a window is newly registered, which is exactly what
+    /// <see cref="WindowManagerService.WindowRegistrationGeneration"/> reports. So the flush now follows the
+    /// change rather than the clock, and in steady state never happens at all.
+    /// </para>
+    /// <para>
+    /// <paramref name="generation"/> changing is the trigger; <see cref="MinFramesBetweenUnmanagedClears"/>
+    /// then bounds the rate, so even a pathological plugin that re-registers a window every frame cannot
+    /// make this rescan more often than the old timer did. The size ceiling is the one unconditional clear,
+    /// since the cache is otherwise no longer bounded by the flush interval.
+    /// </para>
+    /// </summary>
+    internal bool ShouldClearUnmanagedCache(int generation)
+    {
+        if (this.unmanagedWindowNames.Count > MaxUnmanagedWindowNames)
+        {
+            this.lastRegistrationGeneration = generation;
+            this.lastClearFrame = this.frameCounter;
+            return true;
+        }
+
+        if (generation == this.lastRegistrationGeneration)
+            return false;
+
+        if (this.frameCounter - this.lastClearFrame < MinFramesBetweenUnmanagedClears)
+            return false;
+
+        this.lastRegistrationGeneration = generation;
+        this.lastClearFrame = this.frameCounter;
+        return true;
     }
 
     public static bool ValidateWindowDimensions(System.Numerics.Vector2 size) =>
@@ -119,13 +180,38 @@ public class ImGuiContextMonitor
     internal bool TryGetTrackedWindow(string name, [NotNullWhen(true)] out TrackedWindow? tracked) =>
         this.trackedMap.TryGetValue(name, out tracked);
 
+    /// <summary>
+    /// Decodes an ImGui window's null-terminated UTF-8 name into a reusable buffer and returns it as a span.
+    /// <c>Marshal.PtrToStringUTF8</c> used to run here for every window in <c>ctx.Windows</c> on every frame,
+    /// allocating a managed string just to look it up -- and for the great majority of entries (child windows,
+    /// popups, tooltips) the answer was "skip this one" (issue #51). Callers materialise a string only on the
+    /// paths that actually keep one.
+    /// </summary>
+    private unsafe ReadOnlySpan<char> DecodeWindowName(byte* namePtr)
+    {
+        if (namePtr == null)
+            return default;
+
+        var utf8 = System.Runtime.InteropServices.MemoryMarshal.CreateReadOnlySpanFromNullTerminated(namePtr);
+        if (utf8.IsEmpty)
+            return default;
+
+        var maxChars = System.Text.Encoding.UTF8.GetMaxCharCount(utf8.Length);
+        if (this.nameBuffer.Length < maxChars)
+            this.nameBuffer = new char[Math.Max(maxChars, this.nameBuffer.Length * 2)];
+
+        var written = System.Text.Encoding.UTF8.GetChars(utf8, this.nameBuffer);
+        return this.nameBuffer.AsSpan(0, written);
+    }
+
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
     {
         var ctx = ImGui.GetCurrentContext();
         if (ctx.IsNull) return;
 
-        if (this.unmanagedClearCounter++ % 60 == 0)
+        this.frameCounter++;
+        if (this.ShouldClearUnmanagedCache(this.windowManager.WindowRegistrationGeneration))
         {
             this.unmanagedWindowNames.Clear();
         }
@@ -151,6 +237,9 @@ public class ImGuiContextMonitor
         this.dockGroups.Clear();
         this.dockActiveTab.Clear();
 
+        var trackedLookup = this.trackedMap.GetAlternateLookup<ReadOnlySpan<char>>();
+        var unmanagedLookup = this.unmanagedWindowNames.GetAlternateLookup<ReadOnlySpan<char>>();
+
         for (var i = 0; i < ctx.Windows.Size; i++)
         {
             var win = ctx.Windows[i];
@@ -159,30 +248,65 @@ public class ImGuiContextMonitor
             if (!IsWindowActive(win.Active, win.WasActive))
                 continue;
 
-            var name = win.Name != null ? System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)win.Name) : null;
-            if (string.IsNullOrEmpty(name))
+            var nameSpan = this.DecodeWindowName(win.Name);
+            if (nameSpan.IsEmpty)
                 continue;
 
-            if (!this.trackedMap.TryGetValue(name, out var tracked))
-            {
-                if (this.unmanagedWindowNames.Contains(name))
-                    continue;
+            string name;
+            TrackedWindow? tracked;
 
-                // Fast-path: check known window systems for dynamic windows opened between scan ticks
-                tracked = this.windowTracker?.TryFastTrackWindow(name);
-                if (tracked != null)
+            // An already-tracked window hands back the key string the map already holds, so the common case
+            // costs no allocation at all.
+            if (trackedLookup.TryGetValue(nameSpan, out var trackedKey, out var trackedHit))
+            {
+                name = trackedKey;
+                tracked = trackedHit;
+            }
+            else
+            {
+                // unmanagedWindowNames caches only the WindowSystem lookup below, which is the expensive half
+                // (it walks every known WindowSystem) and whose answer changes only when a window is
+                // registered -- see ShouldClearUnmanagedCache. Raw classification is deliberately NOT cached:
+                // it reads this frame's flags, size and content, so a window that is not yet sized or drawn
+                // can legitimately qualify a frame or two later (issue #38).
+                var knownUnmanaged = unmanagedLookup.Contains(nameSpan);
+                tracked = null;
+
+                if (knownUnmanaged)
                 {
-                    this.trackedMap[name] = tracked;
-                }
-                else if (rawEnabled && this.TryTrackRawWindow(win, name, out var rawTracked))
-                {
-                    this.trackedMap[name] = rawTracked;
-                    tracked = rawTracked;
+                    // Settled as belonging to no WindowSystem; only a raw-classification retry can still claim
+                    // it. That gate reads straight off the span, so a name is materialised only for a window
+                    // that is actually a candidate -- this is the steady-state path for every popup and tooltip.
+                    if (!rawEnabled || !ImGuiWindowClassifier.CouldTrack(win.Flags, win.Size, nameSpan))
+                        continue;
+
+                    name = new string(nameSpan);
                 }
                 else
                 {
-                    this.unmanagedWindowNames.Add(name);
-                    continue;
+                    // First sighting since the last cache clear: worth one string.
+                    name = new string(nameSpan);
+
+                    // Fast-path: check known window systems for dynamic windows opened between scan ticks
+                    tracked = this.windowTracker?.TryFastTrackWindow(name);
+                    if (tracked != null)
+                        this.trackedMap[name] = tracked;
+                }
+
+                if (tracked == null)
+                {
+                    if (rawEnabled && this.TryTrackRawWindow(win, name, out var rawTracked))
+                    {
+                        this.trackedMap[name] = rawTracked;
+                        tracked = rawTracked;
+                    }
+                    else
+                    {
+                        if (!knownUnmanaged)
+                            this.unmanagedWindowNames.Add(name);
+
+                        continue;
+                    }
                 }
             }
 
@@ -545,6 +669,13 @@ public class ImGuiContextMonitor
     /// </summary>
     private unsafe bool TryTrackRawWindow(Dalamud.Bindings.ImGui.ImGuiWindowPtr win, string name, out TrackedWindow tracked)
     {
+        // Cheap gates first: this runs every frame for every unmanaged window, and GetCleanTitle allocates.
+        if (!ImGuiWindowClassifier.CouldTrack(win.Flags, win.Size, name))
+        {
+            tracked = null!;
+            return false;
+        }
+
         var cleanTitle = WindowInfoHelper.GetCleanTitle(name);
         var hasContent = win.Appearing ||
                          ValidateWindowContent(win.ContentSize, win.DrawList.IsNull ? 0 : win.DrawList.CmdBuffer.Size);

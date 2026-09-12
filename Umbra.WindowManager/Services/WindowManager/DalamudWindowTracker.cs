@@ -1048,7 +1048,7 @@ public class DalamudWindowTracker : IDisposable
                 else if (actualItem != null && currentDepth < maxDepth)
                 {
                     var ait = actualItem.GetType();
-                    if (IsUiOrServiceType(ait) || ShouldTraverseMemberName(ait.Name))
+                    if (GetTypeScanInfo(ait).IsTraversableItem)
                     {
                         this.ScanObjectForWindowSystemsRecursive(actualItem, currentDepth + 1, maxDepth, visited);
                     }
@@ -1056,42 +1056,37 @@ public class DalamudWindowTracker : IDisposable
             }
         }
 
-        var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
-
         for (var currentType = obj.GetType(); currentType != null && currentType != typeof(object); currentType = currentType.BaseType)
         {
-            foreach (var prop in currentType.GetProperties(flags))
+            var plan = GetTypeScanInfo(currentType);
+
+            var props = plan.GetProperties(currentType);
+            for (var i = 0; i < props.Length; i++)
             {
+                var (prop, kind) = props[i];
+
+                // Traverse members are read only to recurse into, so at maximum depth there is nothing to do
+                // with them. WindowSystem/IWindow members are still read -- they are tracked, not descended.
+                if (kind == ScanMemberKind.Traverse && currentDepth >= maxDepth)
+                    continue;
+
                 try
                 {
-                    if (prop.CanRead && prop.GetIndexParameters().Length == 0)
+                    var val = prop.GetValue(obj);
+                    if (val == null)
+                        continue;
+
+                    if (val is WindowSystem ws)
                     {
-                        if (typeof(WindowSystem).IsAssignableFrom(prop.PropertyType))
-                        {
-                            if (prop.GetValue(obj) is WindowSystem ws)
-                                this.TrackWindowSystem(ws);
-                        }
-                        else if (typeof(IWindow).IsAssignableFrom(prop.PropertyType))
-                        {
-                            if (prop.GetValue(obj) is IWindow w)
-                                this.TrackSingleWindow(w);
-                        }
-                        else if (currentDepth < maxDepth && ShouldTraverseProperty(prop))
-                        {
-                            var val = prop.GetValue(obj);
-                            if (val is WindowSystem ws)
-                            {
-                                this.TrackWindowSystem(ws);
-                            }
-                            else if (val is IWindow w)
-                            {
-                                this.TrackSingleWindow(w);
-                            }
-                            else if (val != null && ShouldTraverseType(val.GetType()))
-                            {
-                                this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
-                            }
-                        }
+                        this.TrackWindowSystem(ws);
+                    }
+                    else if (val is IWindow w)
+                    {
+                        this.TrackSingleWindow(w);
+                    }
+                    else if (kind == ScanMemberKind.Traverse && GetTypeScanInfo(val.GetType()).ShouldTraverse)
+                    {
+                        this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
                     }
                 }
                 catch
@@ -1100,35 +1095,31 @@ public class DalamudWindowTracker : IDisposable
                 }
             }
 
-            foreach (var field in currentType.GetFields(flags))
+            var fields = plan.GetFields(currentType);
+            for (var i = 0; i < fields.Length; i++)
             {
+                var (field, kind) = fields[i];
+
+                if (kind == ScanMemberKind.Traverse && currentDepth >= maxDepth)
+                    continue;
+
                 try
                 {
-                    if (typeof(WindowSystem).IsAssignableFrom(field.FieldType))
+                    var val = field.GetValue(obj);
+                    if (val == null)
+                        continue;
+
+                    if (val is WindowSystem ws)
                     {
-                        if (field.GetValue(obj) is WindowSystem ws)
-                            this.TrackWindowSystem(ws);
+                        this.TrackWindowSystem(ws);
                     }
-                    else if (typeof(IWindow).IsAssignableFrom(field.FieldType))
+                    else if (val is IWindow w)
                     {
-                        if (field.GetValue(obj) is IWindow w)
-                            this.TrackSingleWindow(w);
+                        this.TrackSingleWindow(w);
                     }
-                    else if (currentDepth < maxDepth && ShouldTraverseField(field))
+                    else if (kind == ScanMemberKind.Traverse && GetTypeScanInfo(val.GetType()).ShouldTraverse)
                     {
-                        var val = field.GetValue(obj);
-                        if (val is WindowSystem ws)
-                        {
-                            this.TrackWindowSystem(ws);
-                        }
-                        else if (val is IWindow w)
-                        {
-                            this.TrackSingleWindow(w);
-                        }
-                        else if (val != null && ShouldTraverseType(val.GetType()))
-                        {
-                            this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
-                        }
+                        this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
                     }
                 }
                 catch
@@ -1139,17 +1130,241 @@ public class DalamudWindowTracker : IDisposable
         }
     }
 
+    private enum ScanMemberKind : byte
+    {
+        /// <summary>Declared as a <see cref="WindowSystem"/> or <see cref="IWindow"/>: read the member and track it.</summary>
+        Tracked,
+
+        /// <summary>Passed the traversal filters: read the member and recurse into its value.</summary>
+        Traverse,
+    }
+
+    /// <summary>
+    /// Cached, per-<see cref="Type"/> traversal plan for <see cref="ScanObjectForWindowSystemsRecursive"/>.
+    /// Whether a member is worth reading is a pure function of its declaring type, its declared member type
+    /// and its name -- yet re-deriving it on every pass dominated the 2-second discovery tick (issue #51):
+    /// each member re-ran <see cref="ShouldTraverseField"/> / <see cref="ShouldTraverseProperty"/>, which call
+    /// <see cref="ShouldTraverseMemberName"/> up to three times for ten <c>Contains(..., OrdinalIgnoreCase)</c>
+    /// searches apiece, and <see cref="Type.GetProperties(BindingFlags)"/> / <see cref="Type.GetFields(BindingFlags)"/>
+    /// returned a freshly allocated array every call. Caching collapses that to one build per type, and members
+    /// that fail the filters are dropped from the plan entirely so later scans never look at them again.
+    /// </summary>
+    private sealed class TypeScanInfo
+    {
+        private const BindingFlags MemberFlags =
+            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+
+        /// <summary><see cref="ShouldTraverseType"/> for this type, evaluated once.</summary>
+        public readonly bool ShouldTraverse;
+
+        /// <summary>Whether a collection / DI-container item of this type is worth recursing into.</summary>
+        public readonly bool IsTraversableItem;
+
+        private (PropertyInfo Member, ScanMemberKind Kind)[]? properties;
+        private (FieldInfo Member, ScanMemberKind Kind)[]? fields;
+        private ServiceProbePlan? serviceProbes;
+
+        public TypeScanInfo(Type type)
+        {
+            this.ShouldTraverse = ShouldTraverseType(type);
+            this.IsTraversableItem = IsUiOrServiceType(type) || ShouldTraverseMemberName(type.Name);
+        }
+
+        // The type is passed back in rather than stored, so a cached plan never references its own
+        // ConditionalWeakTable key and the "plugin types stay collectible" guarantee holds by inspection.
+        public (PropertyInfo Member, ScanMemberKind Kind)[] GetProperties(Type type) =>
+            this.properties ??= BuildProperties(type);
+
+        public (FieldInfo Member, ScanMemberKind Kind)[] GetFields(Type type) =>
+            this.fields ??= BuildFields(type);
+
+        public ServiceProbePlan GetServiceProbes(Type type) =>
+            this.serviceProbes ??= new ServiceProbePlan(type);
+
+        private static (PropertyInfo, ScanMemberKind)[] BuildProperties(Type type)
+        {
+            var declared = type.GetProperties(MemberFlags);
+            var result = new List<(PropertyInfo, ScanMemberKind)>(declared.Length);
+
+            foreach (var prop in declared)
+            {
+                // Unreadable and indexed properties were never touched by the scan, whatever their type.
+                if (!prop.CanRead || prop.GetIndexParameters().Length != 0)
+                    continue;
+
+                if (typeof(WindowSystem).IsAssignableFrom(prop.PropertyType) ||
+                    typeof(IWindow).IsAssignableFrom(prop.PropertyType))
+                {
+                    result.Add((prop, ScanMemberKind.Tracked));
+                }
+                else if (ShouldTraverseProperty(prop))
+                {
+                    result.Add((prop, ScanMemberKind.Traverse));
+                }
+            }
+
+            return result.ToArray();
+        }
+
+        private static (FieldInfo, ScanMemberKind)[] BuildFields(Type type)
+        {
+            var declared = type.GetFields(MemberFlags);
+            var result = new List<(FieldInfo, ScanMemberKind)>(declared.Length);
+
+            foreach (var field in declared)
+            {
+                if (typeof(WindowSystem).IsAssignableFrom(field.FieldType) ||
+                    typeof(IWindow).IsAssignableFrom(field.FieldType))
+                {
+                    result.Add((field, ScanMemberKind.Tracked));
+                }
+                else if (ShouldTraverseField(field))
+                {
+                    result.Add((field, ScanMemberKind.Traverse));
+                }
+            }
+
+            return result.ToArray();
+        }
+    }
+
+    /// <summary>
+    /// Cached, per-<see cref="Type"/> shape probes used by <see cref="TryScanServiceProvider"/>. That method runs
+    /// for <em>every</em> object the scan visits -- the <c>_ownedObjects</c> and <c>Provider</c>/<c>Services</c>
+    /// probes sit outside the service-provider guard -- so its half-dozen <c>GetField</c>/<c>GetProperty</c>
+    /// name lookups were paid thousands of times per discovery tick (issue #51). Which members exist is fixed per
+    /// type, so the lookups are resolved once and only the <c>GetValue</c> calls stay on the hot path.
+    /// </summary>
+    private sealed class ServiceProbePlan
+    {
+        private const BindingFlags ProbeFlags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+
+        public readonly bool IsServiceProviderShape;
+
+        // Candidate members are kept as ordered lists -- not a single resolved member -- because the original
+        // probes fell through on a null *value*, not merely on a missing member.
+        public readonly MemberInfo[] RootCandidates;
+        public readonly MemberInfo[] ResolvedServicesCandidates;
+        public readonly MemberInfo[] DisposablesCandidates;
+        public readonly MemberInfo[] OwnedCandidates;
+        public readonly PropertyInfo? ProviderProperty;
+
+        public ServiceProbePlan(Type type)
+        {
+            this.IsServiceProviderShape = typeof(IServiceProvider).IsAssignableFrom(type) ||
+                                          type.Name.Contains("ServiceProvider");
+
+            this.RootCandidates = Collect(
+                type.GetProperty("Root", ProbeFlags),
+                type.GetProperty("_root", ProbeFlags),
+                type.GetField("<Root>k__BackingField", ProbeFlags),
+                type.GetField("<_root>k__BackingField", ProbeFlags),
+                type.GetField("_root", ProbeFlags));
+
+            this.ResolvedServicesCandidates = Collect(
+                type.GetProperty("ResolvedServices", ProbeFlags),
+                type.GetProperty("_resolvedServices", ProbeFlags),
+                type.GetField("<ResolvedServices>k__BackingField", ProbeFlags),
+                type.GetField("<_resolvedServices>k__BackingField", ProbeFlags),
+                type.GetField("_resolvedServices", ProbeFlags),
+                type.GetField("ResolvedServices", ProbeFlags));
+
+            this.DisposablesCandidates = Collect(
+                type.GetProperty("Disposables", ProbeFlags),
+                type.GetProperty("_disposables", ProbeFlags),
+                type.GetField("<Disposables>k__BackingField", ProbeFlags),
+                type.GetField("<_disposables>k__BackingField", ProbeFlags),
+                type.GetField("_disposables", ProbeFlags));
+
+            // The original picked the backing field by *presence* before falling through to the properties by
+            // value, so only the first field that exists takes part in the value chain.
+            var ownedField = type.GetField("_ownedObjects", ProbeFlags)
+                          ?? type.GetField("<_ownedObjects>k__BackingField", ProbeFlags);
+            this.OwnedCandidates = Collect(
+                ownedField,
+                type.GetProperty("_ownedObjects", ProbeFlags),
+                type.GetProperty("OwnedObjects", ProbeFlags));
+
+            var provProp = type.GetProperty("Provider", ProbeFlags) ?? type.GetProperty("Services", ProbeFlags);
+            this.ProviderProperty = provProp is { CanRead: true } && provProp.GetIndexParameters().Length == 0
+                ? provProp
+                : null;
+        }
+
+        private static MemberInfo[] Collect(params MemberInfo?[] candidates)
+        {
+            var count = 0;
+            foreach (var c in candidates)
+            {
+                if (c != null) count++;
+            }
+
+            if (count == 0) return [];
+
+            var result = new MemberInfo[count];
+            var i = 0;
+            foreach (var c in candidates)
+            {
+                if (c != null) result[i++] = c;
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// Reads <paramref name="candidates"/> in order and returns the first non-null value, mirroring the
+    /// <c>?.GetValue(x) ?? ...</c> chains these plans replaced. Exceptions propagate to the caller's single
+    /// try/catch, exactly as before.
+    /// </summary>
+    private static object? FirstNonNullValue(MemberInfo[] candidates, object target)
+    {
+        for (var i = 0; i < candidates.Length; i++)
+        {
+            var value = candidates[i] switch
+            {
+                PropertyInfo prop => prop.GetValue(target),
+                FieldInfo field => field.GetValue(target),
+                _ => null,
+            };
+
+            if (value != null) return value;
+        }
+
+        return null;
+    }
+
+    // Weak-keyed on purpose: scanned types live in other plugins' collectible AssemblyLoadContexts, so a
+    // strong Dictionary<Type, ...> here would pin those contexts and block plugin unload -- turning a
+    // performance fix into the reload leak #45/#47 just closed. Never key this on Type.Name either: two ALC
+    // generations of a reloaded plugin share names but are distinct Types.
+    private static readonly ConditionalWeakTable<Type, TypeScanInfo> TypeScanCache = new();
+
+    // Diagnostics only: how many plans have been built, so tests can assert the cache actually hits.
+    internal static long TypeScanPlansBuilt;
+
+    private static TypeScanInfo GetTypeScanInfo(Type type) =>
+        TypeScanCache.GetValue(type, static t =>
+        {
+            System.Threading.Interlocked.Increment(ref TypeScanPlansBuilt);
+            return new TypeScanInfo(t);
+        });
+
+    /// <summary>Test hook: drops every cached traversal plan so plan building can be observed from scratch.</summary>
+    internal static void ClearTypeScanCache()
+    {
+        TypeScanCache.Clear();
+        System.Threading.Interlocked.Exchange(ref TypeScanPlansBuilt, 0);
+    }
+
     private void TryScanServiceProvider(object obj, int currentDepth, int maxDepth, HashSet<object> visited)
     {
         try
         {
-            var flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
             var objType = obj.GetType();
+            var probes = GetTypeScanInfo(objType).GetServiceProbes(objType);
 
-            var isServiceProvider = typeof(IServiceProvider).IsAssignableFrom(objType) ||
-                                   objType.Name.Contains("ServiceProvider");
-
-            if (isServiceProvider)
+            if (probes.IsServiceProviderShape)
             {
                 if (obj is IServiceProvider sp)
                 {
@@ -1167,21 +1382,12 @@ public class DalamudWindowTracker : IDisposable
                 }
 
                 // Microsoft DI: inspect root engine scope
-                var root = objType.GetProperty("Root", flags)?.GetValue(obj)
-                        ?? objType.GetProperty("_root", flags)?.GetValue(obj)
-                        ?? objType.GetField("<Root>k__BackingField", flags)?.GetValue(obj)
-                        ?? objType.GetField("<_root>k__BackingField", flags)?.GetValue(obj)
-                        ?? objType.GetField("_root", flags)?.GetValue(obj)
-                        ?? obj;
+                var root = FirstNonNullValue(probes.RootCandidates, obj) ?? obj;
                 var rootType = root.GetType();
+                var rootProbes = GetTypeScanInfo(rootType).GetServiceProbes(rootType);
 
                 // Extract resolved singleton services
-                var dict = (rootType.GetProperty("ResolvedServices", flags)?.GetValue(root)
-                         ?? rootType.GetProperty("_resolvedServices", flags)?.GetValue(root)
-                         ?? rootType.GetField("<ResolvedServices>k__BackingField", flags)?.GetValue(root)
-                         ?? rootType.GetField("<_resolvedServices>k__BackingField", flags)?.GetValue(root)
-                         ?? rootType.GetField("_resolvedServices", flags)?.GetValue(root)
-                         ?? rootType.GetField("ResolvedServices", flags)?.GetValue(root)) as IDictionary;
+                var dict = FirstNonNullValue(rootProbes.ResolvedServicesCandidates, root) as IDictionary;
 
                 if (dict != null)
                 {
@@ -1196,7 +1402,7 @@ public class DalamudWindowTracker : IDisposable
                         {
                             this.TrackSingleWindow(w);
                         }
-                        else if (currentDepth < maxDepth && (IsUiOrServiceType(val.GetType()) || ShouldTraverseMemberName(val.GetType().Name)))
+                        else if (currentDepth < maxDepth && GetTypeScanInfo(val.GetType()).IsTraversableItem)
                         {
                             this.ScanObjectForWindowSystemsRecursive(val, currentDepth + 1, maxDepth, visited);
                         }
@@ -1204,11 +1410,7 @@ public class DalamudWindowTracker : IDisposable
                 }
 
                 // Extract disposables list
-                var disposables = (rootType.GetProperty("Disposables", flags)?.GetValue(root)
-                                ?? rootType.GetProperty("_disposables", flags)?.GetValue(root)
-                                ?? rootType.GetField("<Disposables>k__BackingField", flags)?.GetValue(root)
-                                ?? rootType.GetField("<_disposables>k__BackingField", flags)?.GetValue(root)
-                                ?? rootType.GetField("_disposables", flags)?.GetValue(root)) as IEnumerable;
+                var disposables = FirstNonNullValue(rootProbes.DisposablesCandidates, root) as IEnumerable;
 
                 if (disposables != null)
                 {
@@ -1225,7 +1427,7 @@ public class DalamudWindowTracker : IDisposable
                         {
                             this.TrackSingleWindow(w);
                         }
-                        else if (currentDepth < maxDepth && (IsUiOrServiceType(d.GetType()) || ShouldTraverseMemberName(d.GetType().Name)))
+                        else if (currentDepth < maxDepth && GetTypeScanInfo(d.GetType()).IsTraversableItem)
                         {
                             this.ScanObjectForWindowSystemsRecursive(d, currentDepth + 1, maxDepth, visited);
                         }
@@ -1235,11 +1437,7 @@ public class DalamudWindowTracker : IDisposable
 
             // Luna.ServiceManager or similar service managers:
             // Check for _ownedObjects (HashSet<IDisposable>)
-            var ownedField = objType.GetField("_ownedObjects", flags)
-                          ?? objType.GetField("<_ownedObjects>k__BackingField", flags);
-            var owned = (ownedField?.GetValue(obj)
-                      ?? objType.GetProperty("_ownedObjects", flags)?.GetValue(obj)
-                      ?? objType.GetProperty("OwnedObjects", flags)?.GetValue(obj)) as IEnumerable;
+            var owned = FirstNonNullValue(probes.OwnedCandidates, obj) as IEnumerable;
 
             if (owned != null)
             {
@@ -1256,7 +1454,7 @@ public class DalamudWindowTracker : IDisposable
                     {
                         this.TrackSingleWindow(w);
                     }
-                    else if (currentDepth < maxDepth && (IsUiOrServiceType(o.GetType()) || ShouldTraverseMemberName(o.GetType().Name)))
+                    else if (currentDepth < maxDepth && GetTypeScanInfo(o.GetType()).IsTraversableItem)
                     {
                         this.ScanObjectForWindowSystemsRecursive(o, currentDepth + 1, maxDepth, visited);
                     }
@@ -1264,8 +1462,8 @@ public class DalamudWindowTracker : IDisposable
             }
 
             // Check for Provider property on service managers (e.g. Luna.ServiceManager.Provider)
-            var provProp = objType.GetProperty("Provider", flags) ?? objType.GetProperty("Services", flags);
-            if (provProp != null && provProp.CanRead && provProp.GetIndexParameters().Length == 0)
+            var provProp = probes.ProviderProperty;
+            if (provProp != null)
             {
                 var provVal = provProp.GetValue(obj);
                 if (provVal != null && provVal != obj && currentDepth < maxDepth)
@@ -1397,8 +1595,12 @@ public class DalamudWindowTracker : IDisposable
     {
         this.knownWindowSystems[ws] = new PluginContext(pluginInternalName, iconBytes);
 
-        foreach (var window in ws.Windows)
+        // WindowSystem.Windows builds a fresh read-only copy on every single access, so it is read once
+        // into a local here and in every other loop below (issue #51).
+        var windows = ws.Windows;
+        for (var i = 0; i < windows.Count; i++)
         {
+            var window = windows[i];
             if (string.IsNullOrWhiteSpace(window.WindowName)) continue;
 
             var tw = this.windowManagerService.RegisterWindow(window);
@@ -1419,8 +1621,10 @@ public class DalamudWindowTracker : IDisposable
     {
         foreach (var (ws, context) in this.knownWindowSystems)
         {
-            foreach (var window in ws.Windows)
+            var windows = ws.Windows;
+            for (var i = 0; i < windows.Count; i++)
             {
+                var window = windows[i];
                 if (string.IsNullOrWhiteSpace(window.WindowName)) continue;
 
                 var tw = this.windowManagerService.RegisterWindow(window);
@@ -1465,9 +1669,10 @@ public class DalamudWindowTracker : IDisposable
 
         foreach (var (ws, context) in this.knownWindowSystems)
         {
-            for (var i = 0; i < ws.Windows.Count; i++)
+            var windows = ws.Windows;
+            for (var i = 0; i < windows.Count; i++)
             {
-                var window = ws.Windows[i];
+                var window = windows[i];
                 if (string.Equals(window.WindowName, windowName, StringComparison.Ordinal))
                 {
                     var tw = this.windowManagerService.RegisterWindow(window);
