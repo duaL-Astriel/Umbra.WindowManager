@@ -238,7 +238,6 @@ public class DalamudWindowTracker : IDisposable
 
             this.ScanInstalledPlugins(installedPlugins, availableIconUrls);
 
-
             // Dalamud's own core windows (Plugin Installer, Settings, Console, Data, Changelog, ...) live
             // in DalamudInterface's private WindowSystem, not in PluginManager.InstalledPlugins, so they are
             // never reached by the loop above. Resolve DalamudInterface via the same Service<T> pattern and

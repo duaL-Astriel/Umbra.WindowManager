@@ -17,6 +17,21 @@ public class TrackedWindow
         this.Namespace = window.Namespace ?? string.Empty;
     }
 
+    /// <summary>
+    /// Constructs a tracked window that is NOT backed by an <see cref="IWindow"/> (a raw-ImGui window).
+    /// The weak reference is left with a null target, so every <see cref="IWindow"/>-coupled path
+    /// (<see cref="TryGetWindow"/>, button injection, dock groups) is inert; <see cref="ImGuiTrackedWindow"/>
+    /// overrides the capability members to work from observed ImGui state instead (issue #38).
+    /// </summary>
+    protected TrackedWindow(string windowName)
+    {
+        this.windowRef = new WeakReference<IWindow>(null!);
+        this.WindowName = windowName;
+        this.CleanTitle = WindowInfoHelper.GetCleanTitle(windowName);
+        this.Id = WindowInfoHelper.GetWindowId(windowName);
+        this.Namespace = string.Empty;
+    }
+
     public string WindowName { get; }
     public string CleanTitle { get; }
     public string Id { get; }
@@ -45,10 +60,20 @@ public class TrackedWindow
     public bool IsEligibleWindow => this.IsManageable;
 
     /// <summary>
+    /// Whether this tracked entry still corresponds to a live window. For <see cref="IWindow"/>-backed
+    /// windows this is "the weak reference is still alive"; raw-ImGui windows override it with an
+    /// unseen-frame threshold (they have no reference to keep alive). Callers prune on this signal.
+    /// </summary>
+    public virtual bool IsAlive => this.TryGetWindow(out _);
+
+    /// <summary>Whether this is a raw-ImGui window (no <see cref="IWindow"/>). Used for best-effort UI copy.</summary>
+    public virtual bool IsRawImGui => false;
+
+    /// <summary>
     /// Whether the underlying window passes its <see cref="IWindow.DrawConditions"/>.
     /// Returns <c>false</c> if draw conditions fail or throw an exception.
     /// </summary>
-    public bool PassesDrawConditions
+    public virtual bool PassesDrawConditions
     {
         get
         {
@@ -64,7 +89,7 @@ public class TrackedWindow
         }
     }
 
-    public bool IsOpen
+    public virtual bool IsOpen
     {
         get => this.TryGetWindow(out var w) && w.IsOpen && this.PassesDrawConditions;
         set
@@ -80,7 +105,7 @@ public class TrackedWindow
     /// </summary>
     public bool IsUnderlyingOpen => this.TryGetWindow(out var w) && w.IsOpen;
 
-    public bool IsFocused => this.TryGetWindow(out var w) && w.IsFocused;
+    public virtual bool IsFocused => this.TryGetWindow(out var w) && w.IsFocused;
 
     /// <summary>
     /// Whether the window is confirmed to be rendered in the active ImGui context with positive dimensions
@@ -97,7 +122,7 @@ public class TrackedWindow
     /// Whether the window is an interactive, titled user-facing window suitable for management.
     /// Excludes frameless HUD overlays, headless monitors, zero-sized windows, and clickthrough windows.
     /// </summary>
-    public bool IsManageable
+    public virtual bool IsManageable
     {
         get
         {
@@ -123,7 +148,7 @@ public class TrackedWindow
     }
 
 
-    public void BringToFront()
+    public virtual void BringToFront()
     {
         if (this.TryGetWindow(out var w))
         {

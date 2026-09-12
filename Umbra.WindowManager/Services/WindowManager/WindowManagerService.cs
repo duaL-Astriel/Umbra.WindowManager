@@ -14,6 +14,13 @@ public class WindowManagerService
     private readonly HashSet<string> lastBulkMinimizedKeys = [];
     private DateTime lastPruneTime = DateTime.MinValue;
 
+    /// <summary>
+    /// Whether raw-ImGui window tracking is enabled. Written by the widget (which owns the user-facing
+    /// toggle) on the framework update thread and read by <see cref="ImGuiContextMonitor"/> in the draw
+    /// loop; both run on the framework thread, so no synchronization is required. Defaults off (issue #38).
+    /// </summary>
+    public bool RawTrackingEnabled { get; set; }
+
     internal IReadOnlySet<string> LastBulkMinimizedKeys => this.lastBulkMinimizedKeys;
 
     public bool AreAnyWindowsOpen
@@ -22,7 +29,7 @@ public class WindowManagerService
         {
             foreach (var (_, w) in this.windows)
             {
-                if (w.TryGetWindow(out _) && w.IsManageable && w.IsOpen && !w.IsMinimized && !string.IsNullOrWhiteSpace(w.CleanTitle))
+                if (w.IsAlive && w.IsManageable && w.IsOpen && !w.IsMinimized && !string.IsNullOrWhiteSpace(w.CleanTitle))
                     return true;
             }
 
@@ -37,7 +44,7 @@ public class WindowManagerService
         destination.Clear();
         foreach (var (key, w) in this.windows)
         {
-            if (w.TryGetWindow(out _))
+            if (w.IsAlive)
                 destination.Add(w);
             else
                 this.windows.TryRemove(key, out _);
@@ -49,7 +56,7 @@ public class WindowManagerService
         destination.Clear();
         foreach (var (key, w) in this.windows)
         {
-            if (w.TryGetWindow(out _))
+            if (w.IsAlive)
             {
                 if (!w.IsManageable)
                     continue;
@@ -86,7 +93,7 @@ public class WindowManagerService
     {
         foreach (var (key, tw) in this.windows)
         {
-            if (!tw.TryGetWindow(out _))
+            if (!tw.IsAlive)
                 this.windows.TryRemove(key, out _);
         }
     }
@@ -107,6 +114,19 @@ public class WindowManagerService
                 existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window)
                     ? existing
                     : new TrackedWindow(window));
+    }
+
+    /// <summary>
+    /// Registers (or returns the existing) tracked entry for a raw-ImGui window identified only by name.
+    /// Stored in the same dictionary as <see cref="IWindow"/>-backed windows; if the name is currently held
+    /// by a non-raw entry (e.g. a window that later gained an <see cref="IWindow"/>), it is replaced.
+    /// </summary>
+    public TrackedWindow RegisterImGuiWindow(string windowName)
+    {
+        return this.windows.AddOrUpdate(
+            windowName,
+            _ => new ImGuiTrackedWindow(windowName),
+            (_, existing) => existing is ImGuiTrackedWindow ? existing : new ImGuiTrackedWindow(windowName));
     }
 
     public void UnregisterWindow(IWindow window)

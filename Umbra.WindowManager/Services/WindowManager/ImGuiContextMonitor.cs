@@ -22,6 +22,10 @@ public class ImGuiContextMonitor
     private readonly HashSet<string> unmanagedWindowNames = [];
     private int unmanagedClearCounter;
 
+    // Where a soft-hidden raw window is parked. Far off any real viewport; re-applied every frame with
+    // ImGuiCond.Always so a cooperative plugin's own SetWindowPos is the only thing that can override it.
+    private static readonly System.Numerics.Vector2 OffScreenPos = new(-32000f, -32000f);
+
     public ImGuiContextMonitor(WindowManagerService windowManager, DalamudWindowTracker? windowTracker = null)
     {
         this.windowManager = windowManager;
@@ -61,6 +65,44 @@ public class ImGuiContextMonitor
     public static bool IsWindowDocked(uint dockId, bool dockNodeVisible) =>
         dockId != 0 && dockNodeVisible;
 
+    /// <summary>
+    /// Evaluates whether an ImGui window is currently active/drawing in the context.
+    /// In Dear ImGui, a window is marked Active during Begin() and WasActive records whether it was
+    /// active in the previous frame. Inactive windows remain allocated in ctx.Windows indefinitely after
+    /// closing and must be ignored so they don't persist in tracking (issue #38).
+    /// </summary>
+    public static bool IsWindowActive(bool active, bool wasActive) =>
+        active || wasActive;
+
+    /// <summary>
+    /// Decides whether a raw-ImGui window should minimize to the toolbar this frame from a title-bar
+    /// affordance (issue #38). Raw windows have no <see cref="Dalamud.Interface.Windowing.IWindow"/> and so
+    /// get no injected title-bar button, but the native collapse arrow and a title-bar double-click can
+    /// still be intercepted on the raw window and routed to a clean minimize -- mirroring the IWindow path.
+    /// Returns true when the window is on-screen (not already soft-hidden), has a title bar, and either the
+    /// native collapse was triggered or the user double-clicked within the title-bar band while the window
+    /// is the hovered (non-occluded) one. The live ImGui reads are gathered in <see cref="OnDraw"/> and
+    /// passed in so this stays unit-testable like the other monitor predicates.
+    /// </summary>
+    public static bool ShouldMinimizeRawWindowFromTitleBar(
+        bool isMinimized,
+        bool hasTitleBar,
+        bool collapsed,
+        bool titleBarDoubleClicked,
+        bool hovered,
+        System.Numerics.Vector2 mousePos,
+        System.Numerics.Vector2 windowPos,
+        System.Numerics.Vector2 windowSize,
+        float titleBarHeight)
+    {
+        if (isMinimized || !hasTitleBar) return false;
+        if (collapsed) return true;
+        if (!titleBarDoubleClicked || !hovered) return false;
+
+        return mousePos.X >= windowPos.X && mousePos.X <= windowPos.X + windowSize.X &&
+               mousePos.Y >= windowPos.Y && mousePos.Y <= windowPos.Y + titleBarHeight;
+    }
+
     internal void PopulateTrackedMap()
     {
         this.trackedMap.Clear();
@@ -90,6 +132,16 @@ public class ImGuiContextMonitor
 
         this.seenWindows.Clear();
         this.PopulateTrackedMap();
+        var rawEnabled = this.windowManager.RawTrackingEnabled;
+
+        if (!rawEnabled)
+        {
+            for (var i = 0; i < this.trackedBuffer.Count; i++)
+            {
+                if (this.trackedBuffer[i] is ImGuiTrackedWindow raw && raw.ResetOnDisable(out var restorePos))
+                    ImGui.SetWindowPos(raw.WindowName, restorePos, ImGuiCond.Always);
+            }
+        }
 
         foreach (var list in this.dockGroups.Values)
         {
@@ -103,6 +155,9 @@ public class ImGuiContextMonitor
         {
             var win = ctx.Windows[i];
             if (win.IsNull) continue;
+
+            if (!IsWindowActive(win.Active, win.WasActive))
+                continue;
 
             var name = win.Name != null ? System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)win.Name) : null;
             if (string.IsNullOrEmpty(name))
@@ -119,11 +174,24 @@ public class ImGuiContextMonitor
                 {
                     this.trackedMap[name] = tracked;
                 }
+                else if (rawEnabled && this.TryTrackRawWindow(win, name, out var rawTracked))
+                {
+                    this.trackedMap[name] = rawTracked;
+                    tracked = rawTracked;
+                }
                 else
                 {
                     this.unmanagedWindowNames.Add(name);
                     continue;
                 }
+            }
+
+            if (!rawEnabled && tracked is ImGuiTrackedWindow)
+            {
+                win.Hidden = false;
+                win.HiddenFramesCannotSkipItems = 0;
+                win.HiddenFramesForRenderOnly = 0;
+                continue;   // feature off: don't observe/bookkeep a raw entry — let it age out via the Step-5 loop and be pruned (~0.5s)
             }
 
             this.seenWindows.Add(name);
@@ -155,6 +223,53 @@ public class ImGuiContextMonitor
             else if (!tracked.IsMinimized)
             {
                 tracked.HasConfirmedUi = false;
+            }
+
+            if (rawEnabled && tracked is ImGuiTrackedWindow rawWin)
+            {
+                rawWin.ObservedPos = win.Pos;
+                rawWin.ObservedSize = win.Size;
+                rawWin.HasTitleBar = (win.Flags & ImGuiWindowFlags.NoTitleBar) == 0;
+                rawWin.ObservedFocused = !ctx.NavWindow.IsNull &&
+                                         (IntPtr)ctx.NavWindow.Handle == (IntPtr)win.Handle;
+                rawWin.UnseenFrames = 0;
+
+                // Title-bar minimize affordances for raw windows (issue #38). No injected button is possible
+                // (no IWindow.TitleBarButtons), but the native collapse arrow and a title-bar double-click can
+                // be intercepted on the raw `win` and routed to a clean minimize-to-toolbar. Applied before
+                // ComputeFrameAction so the soft-hide takes effect this same frame.
+                var rawTitleBarHeight = ImGui.GetFontSize() + ImGui.GetStyle().FramePadding.Y * 2.0f;
+                if (ShouldMinimizeRawWindowFromTitleBar(
+                        rawWin.IsMinimized, rawWin.HasTitleBar, win.Collapsed,
+                        ImGui.IsMouseDoubleClicked(ImGuiMouseButton.Left), ctx.HoveredWindow == win,
+                        ImGui.GetMousePos(), win.Pos, win.Size, rawTitleBarHeight))
+                {
+                    win.Collapsed = false; // undo the native collapse (a no-op for the double-click path)
+                    this.windowManager.Minimize(tracked);
+                }
+
+                var action = rawWin.ComputeFrameAction(OffScreenPos);
+                switch (action.Kind)
+                {
+                    case RawFrameActionKind.HideOffScreen:
+                        ImGui.SetWindowPos(name, action.Position, ImGuiCond.Always);
+                        win.Hidden = true;
+                        win.HiddenFramesCannotSkipItems = 2;
+                        win.HiddenFramesForRenderOnly = 2;
+                        break;
+                    case RawFrameActionKind.Restore:
+                        ImGui.SetWindowPos(name, action.Position, ImGuiCond.Always);
+                        ImGui.SetWindowFocus(name);
+                        win.Hidden = false;
+                        win.HiddenFramesCannotSkipItems = 0;
+                        win.HiddenFramesForRenderOnly = 0;
+                        break;
+                    case RawFrameActionKind.Focus:
+                        ImGui.SetWindowFocus(name);
+                        break;
+                }
+
+                continue;
             }
 
             // Whether this window is currently docked into a (visible) node this frame. See IsWindowDocked:
@@ -271,6 +386,16 @@ public class ImGuiContextMonitor
             var t = this.trackedBuffer[i];
             if (this.seenWindows.Contains(t.WindowName) || (!string.IsNullOrEmpty(t.Id) && this.seenWindows.Contains(t.Id)))
                 continue;
+
+            if (t is ImGuiTrackedWindow)
+            {
+                t.UnseenFrames++;
+                if (t.UnseenFrames > 5)
+                {
+                    t.HasConfirmedUi = false;
+                }
+                continue;
+            }
 
             if (t.IsOpen && !t.IsMinimized)
             {
@@ -411,6 +536,27 @@ public class ImGuiContextMonitor
         {
             // Never let a dock-node tweak disrupt the draw loop.
         }
+    }
+
+    /// <summary>
+    /// Evaluates a <c>ctx.Windows</c> entry that has neither an <see cref="IWindow"/> nor a known
+    /// <see cref="Dalamud.Interface.Windowing.WindowSystem"/> against the strict raw-window classifier and,
+    /// on a pass, registers it as an <see cref="ImGuiTrackedWindow"/> (issue #38).
+    /// </summary>
+    private unsafe bool TryTrackRawWindow(Dalamud.Bindings.ImGui.ImGuiWindowPtr win, string name, out TrackedWindow tracked)
+    {
+        var cleanTitle = WindowInfoHelper.GetCleanTitle(name);
+        var hasContent = win.Appearing ||
+                         ValidateWindowContent(win.ContentSize, win.DrawList.IsNull ? 0 : win.DrawList.CmdBuffer.Size);
+
+        if (ImGuiWindowClassifier.ShouldTrack(win.Flags, win.Size, name, cleanTitle, hasContent))
+        {
+            tracked = this.windowManager.RegisterImGuiWindow(name);
+            return true;
+        }
+
+        tracked = null!;
+        return false;
     }
 
     private string GetDockKey(uint dockId)

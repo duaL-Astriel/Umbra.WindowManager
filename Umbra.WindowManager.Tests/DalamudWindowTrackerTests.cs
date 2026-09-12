@@ -9,7 +9,7 @@ namespace Umbra.WindowManager.Tests;
 
 public class DalamudWindowTrackerTests
 {
-    private class DummyWindow : Window
+    public class DummyWindow : Window
     {
         public DummyWindow(string name) : base(name) { }
         public override void Draw() { }
@@ -1855,9 +1855,38 @@ public class DalamudWindowTrackerTests
         Assert.True(tw.IsMinimized);
         Assert.False(tw.IsOpen);
     }
+    [Fact]
+    public void AutoHookArchitecture_MinimizingAndRestoring_WorksCleanly()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws = new WindowSystem("AutoHook");
+        var uiWin = new DummyWindow("AutoHook 2.5.0.0###MainAutoHook") { IsOpen = true };
+        ws.AddWindow(uiWin);
+
+        tracker.TrackWindowSystem(ws, "AutoHook", new byte[] { 1, 2, 3 });
+
+        var tracked = service.GetTrackedWindows().Single(t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+        Assert.True(tracked.IsOpen);
+        Assert.False(tracked.IsMinimized);
+        Assert.True(tracked.IsManageable);
+
+        // Minimize via service (as triggered by native title bar collapse in PR #52)
+        service.Minimize(tracked);
+
+        Assert.True(tracked.IsMinimized);
+        Assert.False(uiWin.IsOpen);
+        Assert.False(tracked.IsOpen);
+        Assert.True(tracked.IsManageable); // Minimized window remains manageable to stay in toolbar
+
+        var visibleAndMinimized = service.GetVisibleAndMinimizedWindows();
+        Assert.Contains(visibleAndMinimized, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+
+        // Restore via service
+        service.Restore(tracked);
+        Assert.False(tracked.IsMinimized);
+        Assert.True(uiWin.IsOpen);
+        Assert.True(tracked.IsOpen);
+    }
 }
-
-
-
-
-

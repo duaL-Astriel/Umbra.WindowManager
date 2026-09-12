@@ -223,3 +223,22 @@ To load the built `Umbra.WindowManager.dll`:
 | **Title Bar Button** | Any window | Clicks the original title bar button to minimize to the toolbar. |
 | **Double-Click Title Bar** | Native ImGui collapse | Intercepted and routed to full window minimize. |
 
+### Raw-ImGui windows (experimental)
+
+Some plugins (e.g. Sonar) draw their windows with raw ImGui calls instead of
+Dalamud's window system. These are hidden from the toolbar by default. Enable
+**Track raw ImGui windows (experimental)** in the Window Manager widget settings
+to list them.
+
+This support is best-effort by design: the plugin owns its own draw loop, so
+"minimize" moves the window off-screen rather than truly closing it, restore
+brings it back and focuses it, and a plugin that repositions itself every frame
+can fight the off-screen hide. Windows a plugin fully closes drop from the
+toolbar automatically.
+
+Raw windows get no *injected* title-bar minimize button (that button requires an
+`IWindow`, which they lack). They can still be minimized from the toolbar button,
+the right-click context menu, and — like managed windows — by double-clicking
+their title bar or triggering ImGui's native collapse arrow, both of which are
+intercepted and routed to a clean toolbar minimize.
+
