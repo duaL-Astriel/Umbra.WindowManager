@@ -1253,7 +1253,8 @@ public class DalamudWindowTrackerTests
 
         var tracked1 = service.GetTrackedWindows().Single(t => t.WindowName == "ReloadableWin");
         Assert.True(tracked1.TryGetWindow(out var alive1) && ReferenceEquals(alive1, win1));
-        Assert.Single(win1.TitleBarButtons);
+        Assert.Empty(win1.TitleBarButtons);
+        Assert.Equal(ImGuiWindowFlags.None, win1.Flags & ImGuiWindowFlags.NoCollapse);
 
         // Simulate plugin reload: new instance host2 with new window system and new window instance
         var ws2 = new WindowSystem("Sys2");
@@ -1267,7 +1268,8 @@ public class DalamudWindowTrackerTests
         // WindowManager should now track win2 instead of win1
         var tracked2 = service.GetTrackedWindows().Single(t => t.WindowName == "ReloadableWin");
         Assert.True(tracked2.TryGetWindow(out var alive2) && ReferenceEquals(alive2, win2));
-        Assert.Single(win2.TitleBarButtons);
+        Assert.Empty(win2.TitleBarButtons);
+        Assert.Equal(ImGuiWindowFlags.None, win2.Flags & ImGuiWindowFlags.NoCollapse);
 
         // Fast-tracking should resolve win2, not win1
         var fastTracked = tracker.TryFastTrackWindow("ReloadableWin");
