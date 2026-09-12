@@ -15,7 +15,7 @@ using Umbra.Common;
 namespace Umbra.WindowManager.Services.WindowManager;
 
 [Service]
-public class DalamudWindowTracker
+public class DalamudWindowTracker : IDisposable
 {
     private readonly WindowManagerService windowManagerService;
 
@@ -29,6 +29,18 @@ public class DalamudWindowTracker
     // Dalamud's own logo (UIRes/logo.png under its asset directory), used as the taskbar icon for
     // Dalamud core windows. Null until successfully resolved; resolution is retried on later ticks.
     private byte[]? dalamudCoreIcon;
+
+    // Umbra's own logo (Umbra.images.logo.png embedded in Umbra assembly), used as the taskbar icon for
+    // Umbra core windows. Null until successfully resolved; resolution is retried on later ticks.
+    private byte[]? umbraCoreIcon;
+
+    // Discovered Umbra window adapters keyed by instance ID.
+    private readonly ConcurrentDictionary<string, UmbraWindowAdapter> knownUmbraWindows = new();
+
+    private object? hookedUmbraWindowManager;
+    private Delegate? onUmbraWindowOpenedHandler;
+    private Delegate? onUmbraWindowClosedHandler;
+
     private readonly ConcurrentDictionary<string, byte> pendingDownloads = new();
     private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
 
@@ -43,7 +55,25 @@ public class DalamudWindowTracker
     // instead of every 2-second tick.
     private int scanFailLogCounter;
 
+    /// <summary>
+    /// Event fired whenever a plugin is reloaded, updated, or uninstalled, signalling observers
+    /// (such as <see cref="ImGuiContextMonitor"/>) to clear caches and re-evaluate windows.
+    /// </summary>
+    public event Action? PluginReloaded;
+
+    // Tracks the active plugin instance object (by weak reference) keyed by internal name.
+    // If the instance changes, the plugin was reloaded or updated.
+    private readonly ConcurrentDictionary<string, WeakReference<object>> knownPluginInstances = new(StringComparer.OrdinalIgnoreCase);
+
+    private object? hookedPluginManager;
+    private Delegate? onInstalledPluginsChangedHandler;
+    private object? hookedPluginInterface;
+    private Delegate? onActivePluginsChangedHandler;
+
+
+
     public DalamudWindowTracker(WindowManagerService windowManagerService)
+
     {
         this.windowManagerService = windowManagerService;
         this.ScanPlugins();
@@ -72,92 +102,42 @@ public class DalamudWindowTracker
 
     public static void InjectMinimizeButton(IWindow window, TrackedWindow tracked, WindowManagerService service)
     {
-        // Dock-group members (docked together as tabs, e.g. Glamourer + Penumbra) have no usable
-        // per-window title bar: Dalamud draws the button inside the client content area where it collides
-        // with and renders beneath the plugin's own controls (issue #25). Suppress it here -- in the single
-        // shared injection routine -- so the background discovery ticks and fast-track paths agree with the
-        // draw loop instead of re-adding the button it just removed. The window regains its button when it
-        // leaves the group (DockGroupKey cleared). Minimizing is still available from the toolbar widget.
-        if (tracked.DockGroupKey != null)
-        {
-            RemoveMinimizeButton(window);
-            return;
-        }
+        // Remove any legacy injected minimize buttons that may have accumulated
+        RemoveMinimizeButton(window);
 
-        // Overlays and non-interactive windows should not have minimize buttons injected
+        // Dock-group members (docked together as tabs) have no title bar; minimize is handled by the tab bar button
+        if (tracked.DockGroupKey != null)
+            return;
+
+        // Overlays and non-interactive windows should not have minimize enabled
         if (!CanInjectMinimizeButton(window))
             return;
 
-        // Idempotent fast exit: if our button is already injected and present, return immediately
-        if (InjectedButtons.TryGetValue(window, out var existing) && window.TitleBarButtons.Contains(existing))
-            return;
-
-        // Suppress native ImGui collapse triangle in favor of toolbar minimization
-        window.Flags |= Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse;
-
-        // Clean up any duplicate minimize buttons accumulated across assembly hot-reloads
-        TitleBarButton? existingInList = null;
-        for (var i = window.TitleBarButtons.Count - 1; i >= 0; i--)
-        {
-            var b = window.TitleBarButtons[i];
-            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority == int.MaxValue - 1)
-            {
-                if (existingInList == null)
-                {
-                    existingInList = b;
-                }
-                else
-                {
-                    window.TitleBarButtons.RemoveAt(i);
-                }
-            }
-        }
-
-        if (existingInList != null)
-        {
-            existingInList.Click = _ => service.Minimize(tracked);
-            InjectedButtons.AddOrUpdate(window, existingInList);
-            return;
-        }
+        // Enable the window's original collapse/minimize button by clearing the NoCollapse flag
+        window.Flags &= ~Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse;
 
         // Hook any plugin-provided minimize buttons so clicking them also delegates to WindowManagerService.Minimize
-        for (var i = 0; i < window.TitleBarButtons.Count; i++)
+        if (window.TitleBarButtons != null)
         {
-            var b = window.TitleBarButtons[i];
-            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
+            for (var i = 0; i < window.TitleBarButtons.Count; i++)
             {
-                var origClick = b.Click;
-                b.Click = mb =>
+                var b = window.TitleBarButtons[i];
+                if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority != int.MaxValue - 1)
                 {
-                    origClick?.Invoke(mb);
-                    service.Minimize(tracked);
-                };
+                    var origClick = b.Click;
+                    b.Click = mb =>
+                    {
+                        origClick?.Invoke(mb);
+                        service.Minimize(tracked);
+                    };
+                }
             }
         }
-
-        var button = new TitleBarButton
-        {
-            Icon = FontAwesomeIcon.WindowMinimize,
-            Priority = int.MaxValue - 1,
-            Click = _ => service.Minimize(tracked),
-            ShowTooltip = () =>
-            {
-                if (Dalamud.Bindings.ImGui.ImGui.IsItemHovered())
-                    Dalamud.Bindings.ImGui.ImGui.SetTooltip("Minimize to Umbra Toolbar");
-            }
-        };
-
-        window.TitleBarButtons.Add(button);
-        InjectedButtons.AddOrUpdate(window, button);
     }
 
     /// <summary>
-    /// Removes the minimize button we injected into <paramref name="window"/>, if present. Docked windows
-    /// in a multi-tab dock node have no real title bar, so Dalamud renders the injected button inside the
-    /// client content area where it collides with (and is drawn beneath) the plugin's own controls,
-    /// making it visually obscured and unclickable (issue #25). For those windows we drop the raw button
-    /// and rely on the toolbar / context-menu minimize actions instead. The window becomes eligible for
-    /// re-injection via <see cref="InjectMinimizeButton"/> once it undocks.
+    /// Removes any custom minimize button we may have injected into <paramref name="window"/>, if present.
+    /// Also cleans up any legacy injected minimize buttons accumulated across assembly hot-reloads.
     /// </summary>
     public static void RemoveMinimizeButton(IWindow window)
     {
@@ -169,16 +149,46 @@ public class DalamudWindowTracker
             window.TitleBarButtons.Remove(injected);
             InjectedButtons.Remove(window);
         }
+
+        for (var i = window.TitleBarButtons.Count - 1; i >= 0; i--)
+        {
+            var b = window.TitleBarButtons[i];
+            if (b.Icon == FontAwesomeIcon.WindowMinimize && b.Priority == int.MaxValue - 1)
+            {
+                window.TitleBarButtons.RemoveAt(i);
+            }
+        }
     }
 
     private int isScanning;
+    private int scanPending;
 
     [OnTick(interval: 2000)]
     public void ScanPlugins()
     {
         if (System.Threading.Interlocked.CompareExchange(ref this.isScanning, 1, 0) != 0)
+        {
+            System.Threading.Interlocked.Exchange(ref this.scanPending, 1);
             return;
+        }
 
+        try
+        {
+            do
+            {
+                System.Threading.Interlocked.Exchange(ref this.scanPending, 0);
+                this.ScanPluginsCore();
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref this.scanPending, 0, 1) == 1);
+        }
+        finally
+        {
+            System.Threading.Interlocked.Exchange(ref this.isScanning, 0);
+        }
+    }
+
+    private void ScanPluginsCore()
+    {
         try
         {
             var logAssembly = typeof(Dalamud.Plugin.Services.IPluginLog).Assembly;
@@ -196,6 +206,9 @@ public class DalamudWindowTracker
 
             var pmInstance = ResolveDalamudService(serviceOpenType, pmType);
             if (pmInstance == null) return;
+
+            this.TryHookPluginManagerEvents(pmInstance);
+
 
             var installedProp = pmType.GetProperty("InstalledPlugins", BindingFlags.Public | BindingFlags.Instance);
             if (installedProp?.GetValue(pmInstance) is not IEnumerable installedPlugins) return;
@@ -223,30 +236,7 @@ public class DalamudWindowTracker
                 // Best effort
             }
 
-            foreach (var localPlugin in installedPlugins)
-            {
-                if (localPlugin == null) continue;
-
-                var manifest = localPlugin.GetType().GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
-                var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
-                if (isHide) continue;
-
-                var pluginInstanceField = localPlugin.GetType().GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
-                var pluginObj = pluginInstanceField?.GetValue(localPlugin);
-                if (pluginObj == null) continue;
-
-                this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
-                try
-                {
-                    this.ScanObjectForWindowSystems(pluginObj);
-                    this.ScanPluginAssembly(pluginObj.GetType().Assembly);
-                    this.ScanLocalPluginUiBuilder(localPlugin);
-                }
-                finally
-                {
-                    this.currentPluginContext = null;
-                }
-            }
+            this.ScanInstalledPlugins(installedPlugins, availableIconUrls);
 
             // Dalamud's own core windows (Plugin Installer, Settings, Console, Data, Changelog, ...) live
             // in DalamudInterface's private WindowSystem, not in PluginManager.InstalledPlugins, so they are
@@ -259,6 +249,11 @@ public class DalamudWindowTracker
                 if (diInstance != null)
                     this.ScanDalamudCoreWindows(diInstance, this.TryLoadDalamudCoreIcon(logAssembly, serviceOpenType));
             }
+
+            // Umbra's own internal windows (Settings, Widget Browser, Variable Editor, Toolbar Profile
+            // Manager, Installer) live in Umbra.Windows.WindowManager, not in Dalamud's WindowSystem.
+            // Discover and register them under the synthetic "Umbra" plugin context (issue #44).
+            this.ScanUmbraWindows();
         }
         catch (Exception ex)
         {
@@ -330,6 +325,416 @@ public class DalamudWindowTracker
         finally
         {
             this.currentPluginContext = null;
+        }
+    }
+
+    /// <summary>
+    /// Attempts to resolve <see cref="Umbra.Windows.WindowManager"/> via Umbra's <see cref="Umbra.Common.ServiceContainer"/>
+    /// and scans its active windows under the synthetic "Umbra" plugin context.
+    /// Safely catches any exception outside the game or during startup.
+    /// </summary>
+    internal void ScanUmbraWindows()
+    {
+        try
+        {
+            var scType = typeof(Umbra.Common.ServiceAttribute).Assembly.GetType("Umbra.Common.ServiceContainer");
+            if (scType == null) return;
+
+            object? wmInstance = null;
+            var getMethod = scType.GetMethod("GetInstance", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static, [typeof(Type)]);
+            if (getMethod != null)
+            {
+                try
+                {
+                    wmInstance = getMethod.Invoke(null, [typeof(Umbra.Windows.WindowManager)]);
+                }
+                catch
+                {
+                    // Fall through to Instances field fallback
+                }
+            }
+
+            if (wmInstance == null)
+            {
+                var instancesField = scType.GetField("Instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+                if (instancesField?.GetValue(null) is IDictionary instancesDict &&
+                    instancesDict.Contains(typeof(Umbra.Windows.WindowManager)))
+                {
+                    wmInstance = instancesDict[typeof(Umbra.Windows.WindowManager)];
+                }
+            }
+
+            if (wmInstance != null)
+            {
+                this.ScanUmbraCoreWindows(wmInstance, this.TryLoadUmbraCoreIcon());
+            }
+        }
+        catch
+        {
+            // Best effort: safe outside the game loop / in unit tests
+        }
+    }
+
+    internal void ScanUmbraCoreWindows(object windowManager)
+        => this.ScanUmbraCoreWindows(windowManager, this.TryLoadUmbraCoreIcon());
+
+    internal void ScanUmbraCoreWindows(object windowManager, byte[]? coreIcon)
+    {
+        this.HookUmbraWindowManagerEvents(windowManager);
+
+        coreIcon ??= this.TryLoadUmbraCoreIcon();
+
+        var dict = GetUmbraInstancesDictionary(windowManager);
+        var activeInstances = ExtractUmbraInstances(windowManager).ToList();
+        var activeKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var (instanceId, window) in activeInstances)
+        {
+            activeKeys.Add(instanceId);
+
+            UmbraWindowProxy? proxy = null;
+            if (dict != null)
+            {
+                try
+                {
+                    lock (dict)
+                    {
+                        if (dict.Contains(instanceId))
+                        {
+                            if (dict[instanceId] is UmbraWindowProxy existingProxy)
+                            {
+                                proxy = existingProxy;
+                            }
+                            else
+                            {
+                                proxy = new UmbraWindowProxy(window);
+                                dict[instanceId] = proxy;
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Best effort
+                }
+            }
+
+            if (this.knownUmbraWindows.TryGetValue(instanceId, out var existingAdapter))
+            {
+                if (ReferenceEquals(existingAdapter.UnderlyingWindow, window))
+                {
+                    var twExisting = this.windowManagerService.RegisterWindow(existingAdapter);
+                    twExisting.PluginInternalName = "Umbra";
+                    if (coreIcon != null) twExisting.IconBytes = coreIcon;
+                    existingAdapter.IsBeingMinimized = () => twExisting.IsMinimized;
+                    if (proxy != null) existingAdapter.Proxy = proxy;
+                    existingAdapter.WindowManager = windowManager;
+                    existingAdapter.HookTitleBarMinimize(this.windowManagerService, twExisting);
+                    if (window.IsMinimized && !twExisting.IsMinimized)
+                    {
+                        this.windowManagerService.Minimize(twExisting);
+                    }
+                    continue;
+                }
+
+                this.windowManagerService.UnregisterWindow(existingAdapter);
+                this.knownUmbraWindows.TryRemove(instanceId, out _);
+            }
+
+            var adapter = new UmbraWindowAdapter(instanceId, window, proxy: proxy, windowManager: windowManager);
+            var tw = this.windowManagerService.RegisterWindow(adapter);
+            tw.PluginInternalName = "Umbra";
+            tw.IconBytes = coreIcon;
+            adapter.IsBeingMinimized = () => tw.IsMinimized;
+            adapter.HookTitleBarMinimize(this.windowManagerService, tw);
+            if (window.IsMinimized && !tw.IsMinimized)
+            {
+                this.windowManagerService.Minimize(tw);
+            }
+            this.knownUmbraWindows[instanceId] = adapter;
+        }
+
+        foreach (var kvp in this.knownUmbraWindows)
+        {
+            if (!activeKeys.Contains(kvp.Key))
+            {
+                if (this.knownUmbraWindows.TryRemove(kvp.Key, out var removed))
+                {
+                    this.windowManagerService.UnregisterWindow(removed);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Loads the embedded Umbra logo (<c>Umbra.images.logo.png</c>) from the Umbra assembly
+    /// for use as the taskbar icon for Umbra core windows. Cached once loaded; returns null
+    /// safely if the resource cannot be loaded.
+    /// </summary>
+    internal byte[]? TryLoadUmbraCoreIcon()
+    {
+        if (this.umbraCoreIcon != null)
+            return this.umbraCoreIcon;
+
+        if (this.iconCache.TryGetValue("Umbra", out var cached) && cached != null)
+        {
+            this.umbraCoreIcon = cached;
+            return cached;
+        }
+
+        try
+        {
+            var asm = Type.GetType("Umbra.Plugin, Umbra")?.Assembly ?? typeof(Umbra.Windows.IWindow).Assembly;
+            using var stream = asm.GetManifestResourceStream("Umbra.images.logo.png");
+            if (stream == null)
+                return null;
+
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            var bytes = ms.ToArray();
+            this.umbraCoreIcon = bytes;
+            this.iconCache["Umbra"] = bytes;
+            return bytes;
+        }
+        catch
+        {
+            // Safe fallback: returns null if resource is missing or throws
+            return null;
+        }
+    }
+
+    internal static IDictionary? GetUmbraInstancesDictionary(object windowManager)
+    {
+        var wmType = windowManager.GetType();
+        var field = wmType.GetField("_instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                 ?? wmType.GetField("Instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+        var obj = field?.GetValue(windowManager);
+        if (obj == null)
+        {
+            var prop = wmType.GetProperty("Instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                    ?? wmType.GetProperty("_instances", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            obj = prop?.GetValue(windowManager);
+        }
+
+        return obj as IDictionary;
+    }
+
+    private static IEnumerable<KeyValuePair<string, Umbra.Windows.IWindow>> ExtractUmbraInstances(object windowManager)
+    {
+        var dict = GetUmbraInstancesDictionary(windowManager);
+        if (dict != null)
+        {
+            var entries = new List<KeyValuePair<string, Umbra.Windows.IWindow>>();
+            try
+            {
+                lock (dict)
+                {
+                    foreach (DictionaryEntry entry in dict)
+                    {
+                        if (entry.Key is string instanceId)
+                        {
+                            if (entry.Value is UmbraWindowProxy proxy)
+                            {
+                                entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, proxy.UnderlyingWindow));
+                            }
+                            else if (entry.Value is Umbra.Windows.IWindow window)
+                            {
+                                entries.Add(new KeyValuePair<string, Umbra.Windows.IWindow>(instanceId, window));
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort snapshot in case of concurrent dictionary modification by Umbra
+            }
+
+            return entries;
+        }
+
+        return Enumerable.Empty<KeyValuePair<string, Umbra.Windows.IWindow>>();
+    }
+
+    private void HookUmbraWindowManagerEvents(object windowManager)
+    {
+        lock (this.knownUmbraWindows)
+        {
+            if (ReferenceEquals(this.hookedUmbraWindowManager, windowManager))
+                return;
+
+            if (this.hookedUmbraWindowManager != null)
+                this.UnhookUmbraWindowManagerEvents();
+
+            this.hookedUmbraWindowManager = windowManager;
+
+            try
+            {
+                var wmType = windowManager.GetType();
+                var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (openedEvent != null && openedEvent.EventHandlerType != null)
+                {
+                    var handler = this.CreateUmbraEventHandler(openedEvent.EventHandlerType, this.OnUmbraWindowOpened);
+                    if (handler != null)
+                    {
+                        openedEvent.AddEventHandler(windowManager, handler);
+                        this.onUmbraWindowOpenedHandler = handler;
+                    }
+                }
+
+                var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (closedEvent != null && closedEvent.EventHandlerType != null)
+                {
+                    var handler = this.CreateUmbraEventHandler(closedEvent.EventHandlerType, this.OnUmbraWindowClosed);
+                    if (handler != null)
+                    {
+                        closedEvent.AddEventHandler(windowManager, handler);
+                        this.onUmbraWindowClosedHandler = handler;
+                    }
+                }
+            }
+            catch
+            {
+                // Best effort
+            }
+        }
+    }
+
+    private void UnhookUmbraWindowManagerEvents()
+    {
+        lock (this.knownUmbraWindows)
+        {
+            if (this.hookedUmbraWindowManager == null)
+                return;
+
+            try
+            {
+                var dict = GetUmbraInstancesDictionary(this.hookedUmbraWindowManager);
+                if (dict != null)
+                {
+                    try
+                    {
+                        lock (dict)
+                        {
+                            foreach (var kvp in this.knownUmbraWindows)
+                            {
+                                if (dict.Contains(kvp.Key) && dict[kvp.Key] is UmbraWindowProxy proxy)
+                                {
+                                    dict[kvp.Key] = proxy.UnderlyingWindow;
+                                }
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // Best effort
+                    }
+                }
+
+                var wmType = this.hookedUmbraWindowManager.GetType();
+                if (this.onUmbraWindowOpenedHandler != null)
+                {
+                    var openedEvent = wmType.GetEvent("OnWindowOpened", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    openedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowOpenedHandler);
+                }
+
+                if (this.onUmbraWindowClosedHandler != null)
+                {
+                    var closedEvent = wmType.GetEvent("OnWindowClosed", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    closedEvent?.RemoveEventHandler(this.hookedUmbraWindowManager, this.onUmbraWindowClosedHandler);
+                }
+            }
+            catch
+            {
+                // Best effort
+            }
+
+            this.hookedUmbraWindowManager = null;
+            this.onUmbraWindowOpenedHandler = null;
+            this.onUmbraWindowClosedHandler = null;
+        }
+    }
+
+    private Delegate? CreateUmbraEventHandler(Type eventHandlerType, Action<object?> callback)
+    {
+        var invoke = eventHandlerType.GetMethod("Invoke");
+        if (invoke == null) return null;
+
+        var parameters = invoke.GetParameters();
+        if (parameters.Length == 0)
+        {
+            Action handler = () => callback(null);
+            return Delegate.CreateDelegate(eventHandlerType, handler.Target, handler.Method);
+        }
+
+        if (parameters.Length == 1)
+        {
+            var paramType = parameters[0].ParameterType;
+            var dispatcher = new UmbraEventDispatcher(callback);
+            var method = typeof(UmbraEventDispatcher)
+                .GetMethod(nameof(UmbraEventDispatcher.Dispatch), BindingFlags.Public | BindingFlags.Instance)!
+                .MakeGenericMethod(paramType);
+            return Delegate.CreateDelegate(eventHandlerType, dispatcher, method);
+        }
+
+        return null;
+    }
+
+    private sealed class UmbraEventDispatcher
+    {
+        private readonly Action<object?> callback;
+
+        public UmbraEventDispatcher(Action<object?> callback)
+        {
+            this.callback = callback;
+        }
+
+        public void Dispatch<T>(T arg)
+        {
+            this.callback(arg);
+        }
+    }
+
+    private void OnUmbraWindowOpened(object? rawWindow)
+    {
+        try
+        {
+            if (this.hookedUmbraWindowManager != null)
+            {
+                this.ScanUmbraCoreWindows(this.hookedUmbraWindowManager, this.TryLoadUmbraCoreIcon());
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    private void OnUmbraWindowClosed(object? rawWindow)
+    {
+        try
+        {
+            if (rawWindow is Umbra.Windows.IWindow window)
+            {
+                var match = this.knownUmbraWindows.FirstOrDefault(kvp => ReferenceEquals(kvp.Value.UnderlyingWindow, window));
+                if (!string.IsNullOrEmpty(match.Key))
+                {
+                    if (this.knownUmbraWindows.TryRemove(match.Key, out var adapter))
+                    {
+                        this.windowManagerService.UnregisterWindow(adapter);
+                    }
+                    return;
+                }
+            }
+
+            if (this.hookedUmbraWindowManager != null)
+            {
+                this.ScanUmbraCoreWindows(this.hookedUmbraWindowManager, this.TryLoadUmbraCoreIcon());
+            }
+        }
+        catch
+        {
+            // Best effort
         }
     }
 
@@ -1208,6 +1613,28 @@ public class DalamudWindowTracker
     {
         if (string.IsNullOrWhiteSpace(windowName)) return null;
 
+        var windowId = WindowInfoHelper.GetWindowId(windowName);
+
+        foreach (var adapter in this.knownUmbraWindows.Values)
+        {
+            if (string.Equals(adapter.WindowName, windowName, StringComparison.Ordinal) ||
+                string.Equals(adapter.InstanceId, windowName, StringComparison.Ordinal) ||
+                (!string.IsNullOrEmpty(windowId) && string.Equals(adapter.InstanceId, windowId, StringComparison.Ordinal)))
+            {
+                var tw = this.windowManagerService.RegisterWindow(adapter);
+                tw.PluginInternalName = "Umbra";
+                var coreIcon = this.TryLoadUmbraCoreIcon();
+                if (coreIcon != null) tw.IconBytes = coreIcon;
+                adapter.IsBeingMinimized = () => tw.IsMinimized;
+                adapter.HookTitleBarMinimize(this.windowManagerService, tw);
+                if (adapter.UnderlyingWindow.IsMinimized && !tw.IsMinimized)
+                {
+                    this.windowManagerService.Minimize(tw);
+                }
+                return tw;
+            }
+        }
+
         foreach (var (ws, context) in this.knownWindowSystems)
         {
             for (var i = 0; i < ws.Windows.Count; i++)
@@ -1229,5 +1656,307 @@ public class DalamudWindowTracker
         return null;
     }
 
+    /// <summary>
+    /// Removes all tracking state for the specified plugin: drops its known window systems from the
+    /// fast-track cache, unregisters its windows from <see cref="WindowManagerService"/>, and evicts its
+    /// cached icon so a newly updated or reloaded plugin can be cleanly discovered and registered.
+    /// </summary>
+    public void UntrackPlugin(string internalName)
+    {
+        if (string.IsNullOrWhiteSpace(internalName)) return;
+
+        if (string.Equals(internalName, "Umbra", StringComparison.OrdinalIgnoreCase))
+        {
+            this.UnhookUmbraWindowManagerEvents();
+            this.knownUmbraWindows.Clear();
+            this.iconCache.TryRemove("Umbra", out _);
+            this.umbraCoreIcon = null;
+            this.windowManagerService.UnregisterWindowsForPlugin("Umbra");
+            return;
+        }
+
+        foreach (var (ws, context) in this.knownWindowSystems)
+        {
+            if (string.Equals(context.InternalName, internalName, StringComparison.OrdinalIgnoreCase))
+            {
+                this.knownWindowSystems.TryRemove(ws, out _);
+            }
+        }
+
+        this.iconCache.TryRemove(internalName, out _);
+        this.knownPluginInstances.TryRemove(internalName, out _);
+        this.windowManagerService.UnregisterWindowsForPlugin(internalName);
+    }
+
+    /// <summary>
+    /// Scans a collection of installed plugins to discover window systems and windows, automatically
+    /// detecting plugin reloads, updates, or uninstalls and keeping window registrations up to date.
+    /// </summary>
+    internal void ScanInstalledPlugins(IEnumerable installedPlugins, IReadOnlyDictionary<string, string>? availableIconUrls)
+    {
+        var seenPlugins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var stateChanged = false;
+
+        var pluginsToScan = new List<object>();
+        if (installedPlugins is IList list)
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                var p = list[i];
+                if (p != null) pluginsToScan.Add(p);
+            }
+        }
+        else
+        {
+            foreach (var p in installedPlugins)
+            {
+                if (p != null) pluginsToScan.Add(p);
+            }
+        }
+
+        foreach (var localPlugin in pluginsToScan)
+        {
+            var lpType = localPlugin.GetType();
+            var manifest = lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
+            var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
+            if (isHide) continue;
+
+            var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string
+                            ?? lpType.GetProperty("InternalName", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin) as string;
+
+            var pluginInstanceField = lpType.GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
+            var pluginObj = pluginInstanceField?.GetValue(localPlugin);
+
+            if (!string.IsNullOrEmpty(internalName))
+            {
+                if (pluginObj == null)
+                {
+                    if (this.hookedPluginInterface != null)
+                    {
+                        var piCheckProp = lpType.GetProperty("DalamudInterface", BindingFlags.Public | BindingFlags.Instance)
+                                       ?? lpType.GetProperty("PluginInterface", BindingFlags.Public | BindingFlags.Instance);
+                        var piCheckInstance = piCheckProp?.GetValue(localPlugin);
+                        if (piCheckInstance != null && ReferenceEquals(this.hookedPluginInterface, piCheckInstance))
+                        {
+                            this.UnhookPluginInterface();
+                        }
+                    }
+
+                    // Plugin is unloaded or disabled
+                    if (this.knownPluginInstances.TryRemove(internalName, out _))
+                    {
+                        this.UntrackPlugin(internalName);
+                        stateChanged = true;
+                    }
+                    continue;
+                }
+
+                seenPlugins.Add(internalName);
+
+                // Detect reload or instance replacement
+                if (this.knownPluginInstances.TryGetValue(internalName, out var oldObjRef))
+                {
+                    if (!oldObjRef.TryGetTarget(out var oldObj) || !ReferenceEquals(oldObj, pluginObj))
+                    {
+                        // Instance changed! Plugin reloaded or updated
+                        this.UntrackPlugin(internalName);
+                        this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                        stateChanged = true;
+                    }
+                }
+                else
+                {
+                    this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                    stateChanged = true;
+                }
+            }
+            else if (pluginObj == null)
+            {
+                continue;
+            }
+
+            var piProp = lpType.GetProperty("DalamudInterface", BindingFlags.Public | BindingFlags.Instance)
+                      ?? lpType.GetProperty("PluginInterface", BindingFlags.Public | BindingFlags.Instance);
+            var piInstance = piProp?.GetValue(localPlugin);
+            if (piInstance != null)
+            {
+                if (string.Equals(internalName, "Umbra", StringComparison.OrdinalIgnoreCase))
+                {
+                    this.TryHookPreferredPluginInterfaceEvents(piInstance);
+                }
+                else
+                {
+                    this.TryHookPluginInterfaceEvents(piInstance);
+                }
+            }
+
+            this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
+            try
+            {
+                this.ScanObjectForWindowSystems(pluginObj);
+                this.ScanPluginAssembly(pluginObj.GetType().Assembly);
+                this.ScanLocalPluginUiBuilder(localPlugin);
+            }
+            finally
+            {
+                this.currentPluginContext = null;
+            }
+        }
+
+        // Untrack any plugins that were uninstalled or removed from installedPlugins
+        foreach (var trackedName in this.knownPluginInstances.Keys)
+        {
+            if (!seenPlugins.Contains(trackedName))
+            {
+                this.UntrackPlugin(trackedName);
+                this.knownPluginInstances.TryRemove(trackedName, out _);
+                stateChanged = true;
+            }
+        }
+
+        if (stateChanged)
+        {
+            this.PluginReloaded?.Invoke();
+        }
+    }
+
+    internal void TryHookPluginManagerEvents(object pmInstance)
+    {
+        if (this.hookedPluginManager != null) return;
+
+        try
+        {
+            var pmType = pmInstance.GetType();
+            var installedEvent = pmType.GetEvent("OnInstalledPluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (installedEvent != null)
+            {
+                var actionMethod = typeof(DalamudWindowTracker).GetMethod(nameof(this.OnInstalledPluginsChanged), BindingFlags.NonPublic | BindingFlags.Instance);
+                if (actionMethod != null && installedEvent.EventHandlerType != null)
+                {
+                    var handler = Delegate.CreateDelegate(installedEvent.EventHandlerType, this, actionMethod);
+                    installedEvent.AddEventHandler(pmInstance, handler);
+                    this.onInstalledPluginsChangedHandler = handler;
+                    this.hookedPluginManager = pmInstance;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    internal void TryHookPluginInterfaceEvents(object piInstance)
+    {
+        this.TryHookPluginInterfaceEventsInternal(piInstance, false);
+    }
+
+    internal void TryHookPreferredPluginInterfaceEvents(object piInstance)
+    {
+        this.TryHookPluginInterfaceEventsInternal(piInstance, true);
+    }
+
+    private void TryHookPluginInterfaceEventsInternal(object piInstance, bool isPreferred)
+    {
+        if (this.hookedPluginInterface != null && !isPreferred) return;
+        if (ReferenceEquals(this.hookedPluginInterface, piInstance)) return;
+
+        try
+        {
+            if (this.hookedPluginInterface != null && isPreferred)
+            {
+                this.UnhookPluginInterface();
+            }
+
+            if (piInstance is Dalamud.Plugin.IDalamudPluginInterface dpi)
+            {
+                dpi.ActivePluginsChanged += this.OnActivePluginsChanged;
+                this.hookedPluginInterface = dpi;
+                return;
+            }
+
+            var piType = piInstance.GetType();
+            var activeEvent = piType.GetEvent("ActivePluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (activeEvent != null)
+            {
+                var actionMethod = typeof(DalamudWindowTracker).GetMethod(nameof(this.OnActivePluginsChanged), BindingFlags.NonPublic | BindingFlags.Instance);
+                if (actionMethod != null && activeEvent.EventHandlerType != null)
+                {
+                    var handler = Delegate.CreateDelegate(activeEvent.EventHandlerType, this, actionMethod);
+                    activeEvent.AddEventHandler(piInstance, handler);
+                    this.onActivePluginsChangedHandler = handler;
+                    this.hookedPluginInterface = piInstance;
+                }
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+    }
+
+    private void UnhookPluginInterface()
+    {
+        if (this.hookedPluginInterface == null) return;
+
+        try
+        {
+            if (this.hookedPluginInterface is Dalamud.Plugin.IDalamudPluginInterface dpi)
+            {
+                dpi.ActivePluginsChanged -= this.OnActivePluginsChanged;
+            }
+            else if (this.onActivePluginsChangedHandler != null)
+            {
+                var piType = this.hookedPluginInterface.GetType();
+                var activeEvent = piType.GetEvent("ActivePluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                activeEvent?.RemoveEventHandler(this.hookedPluginInterface, this.onActivePluginsChangedHandler);
+            }
+        }
+        catch
+        {
+            // Best effort
+        }
+
+        this.hookedPluginInterface = null;
+        this.onActivePluginsChangedHandler = null;
+    }
+
+    private void OnInstalledPluginsChanged()
+    {
+        this.ScanPlugins();
+    }
+
+    private void OnActivePluginsChanged(Dalamud.Plugin.IActivePluginsChangedEventArgs args)
+    {
+        this.ScanPlugins();
+    }
+
+    public void Dispose()
+    {
+        if (this.hookedPluginManager != null && this.onInstalledPluginsChangedHandler != null)
+        {
+            try
+            {
+                var pmType = this.hookedPluginManager.GetType();
+                var installedEvent = pmType.GetEvent("OnInstalledPluginsChanged", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                installedEvent?.RemoveEventHandler(this.hookedPluginManager, this.onInstalledPluginsChangedHandler);
+            }
+            catch
+            {
+                // Best effort
+            }
+            this.hookedPluginManager = null;
+            this.onInstalledPluginsChangedHandler = null;
+        }
+
+        this.UnhookPluginInterface();
+        this.UnhookUmbraWindowManagerEvents();
+        this.knownUmbraWindows.Clear();
+    }
+
+
     internal sealed record PluginContext(string? InternalName, byte[]? IconBytes);
+
+
+
 }

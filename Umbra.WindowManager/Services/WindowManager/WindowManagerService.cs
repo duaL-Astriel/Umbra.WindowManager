@@ -11,6 +11,7 @@ public class WindowManagerService
 {
     private readonly ConcurrentDictionary<string, TrackedWindow> windows = new();
     private readonly ConcurrentDictionary<string, DockGroup> dockGroups = new();
+    private readonly HashSet<string> lastBulkMinimizedKeys = [];
     private DateTime lastPruneTime = DateTime.MinValue;
 
     /// <summary>
@@ -19,6 +20,24 @@ public class WindowManagerService
     /// loop; both run on the framework thread, so no synchronization is required. Defaults off (issue #38).
     /// </summary>
     public bool RawTrackingEnabled { get; set; }
+
+    internal IReadOnlySet<string> LastBulkMinimizedKeys => this.lastBulkMinimizedKeys;
+
+    public bool AreAnyWindowsOpen
+    {
+        get
+        {
+            foreach (var (_, w) in this.windows)
+            {
+                if (w.IsAlive && w.IsManageable && w.IsOpen && !w.IsMinimized && !string.IsNullOrWhiteSpace(w.CleanTitle))
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    public bool CanRestoreBulkMinimized => this.lastBulkMinimizedKeys.Count > 0 && !this.AreAnyWindowsOpen;
 
     public void GetTrackedWindows(List<TrackedWindow> destination)
     {
@@ -115,6 +134,46 @@ public class WindowManagerService
         this.windows.TryRemove(window.WindowName, out _);
     }
 
+    public void UnregisterWindowsForPlugin(string pluginInternalName)
+    {
+        if (string.IsNullOrWhiteSpace(pluginInternalName))
+            return;
+
+        var affectedDockKeys = new HashSet<string>();
+        foreach (var (key, tw) in this.windows)
+        {
+            if (string.Equals(tw.PluginInternalName, pluginInternalName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (tw.DockGroupKey != null)
+                    affectedDockKeys.Add(tw.DockGroupKey);
+
+                this.windows.TryRemove(key, out _);
+            }
+        }
+
+        foreach (var dockKey in affectedDockKeys)
+        {
+            if (this.dockGroups.TryGetValue(dockKey, out var group))
+            {
+                var hasLiveMembers = false;
+                foreach (var member in group.Members)
+                {
+                    if (this.windows.ContainsKey(member.WindowName))
+                    {
+                        hasLiveMembers = true;
+                        break;
+                    }
+                }
+
+                if (!hasLiveMembers)
+                {
+                    this.RemoveDockGroup(dockKey);
+                }
+            }
+        }
+    }
+
+
     public void Minimize(TrackedWindow tracked)
     {
         if (tracked.DockGroupKey != null && this.dockGroups.TryGetValue(tracked.DockGroupKey, out var group))
@@ -163,6 +222,97 @@ public class WindowManagerService
     {
         tracked.IsMinimized = false;
         tracked.IsOpen = false;
+    }
+
+    /// <summary>
+    /// Minimizes all currently open and manageable plugin windows at once.
+    /// Retains a snapshot of windows minimized by this action to allow toggling restore.
+    /// </summary>
+    public void MinimizeAll()
+    {
+        this.lastBulkMinimizedKeys.Clear();
+        var handledDockGroups = new HashSet<string>();
+
+        var openWindows = new List<TrackedWindow>();
+        foreach (var (_, w) in this.windows)
+        {
+            if (w.TryGetWindow(out _) && w.IsManageable && w.IsOpen && !w.IsMinimized && !string.IsNullOrWhiteSpace(w.CleanTitle))
+            {
+                openWindows.Add(w);
+            }
+        }
+
+        foreach (var w in openWindows)
+        {
+            if (w.DockGroupKey != null && this.dockGroups.TryGetValue(w.DockGroupKey, out var group))
+            {
+                if (handledDockGroups.Add(w.DockGroupKey))
+                {
+                    group.Minimize();
+                    foreach (var member in group.Members)
+                    {
+                        this.lastBulkMinimizedKeys.Add(member.WindowName);
+                    }
+                }
+            }
+            else
+            {
+                this.Minimize(w);
+                this.lastBulkMinimizedKeys.Add(w.WindowName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Restores previously bulk-minimized windows. If no bulk snapshot exists, restores all
+    /// minimized manageable windows.
+    /// </summary>
+    public void RestoreAll()
+    {
+        var handledDockGroups = new HashSet<string>();
+
+        if (this.lastBulkMinimizedKeys.Count > 0)
+        {
+            foreach (var key in this.lastBulkMinimizedKeys)
+            {
+                if (this.windows.TryGetValue(key, out var w) && w.TryGetWindow(out _))
+                {
+                    if (w.DockGroupKey != null && this.dockGroups.TryGetValue(w.DockGroupKey, out var group))
+                    {
+                        if (handledDockGroups.Add(w.DockGroupKey))
+                        {
+                            group.Restore();
+                        }
+                    }
+                    else
+                    {
+                        this.Restore(w);
+                    }
+                }
+            }
+
+            this.lastBulkMinimizedKeys.Clear();
+        }
+        else
+        {
+            foreach (var (_, w) in this.windows)
+            {
+                if (w.TryGetWindow(out _) && w.IsManageable && w.IsMinimized)
+                {
+                    if (w.DockGroupKey != null && this.dockGroups.TryGetValue(w.DockGroupKey, out var group))
+                    {
+                        if (handledDockGroups.Add(w.DockGroupKey))
+                        {
+                            group.Restore();
+                        }
+                    }
+                    else
+                    {
+                        this.Restore(w);
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>

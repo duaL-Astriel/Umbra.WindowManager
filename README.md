@@ -26,8 +26,12 @@ It acts as a comprehensive taskbar and window manager for the entire Dalamud plu
   - Interactive states: `.active` (accented when focused), `.open` (standard background), `.minimized` (dimmed at 60% opacity), `.dock-group` (a collapsed group of docked tabs).
   - Grouped dock tabs collapse into a single split-view button: at two members each side shows icon + title separated by a divider; past two members the titles drop to an icon-only split row so the button stays compact. The active tab reads at full strength; the others recede. One left-click toggles the whole group.
   - Per-window icons: renders the owning plugin's icon (`images/icon.png`, resolved via reflection) with a text-monogram fallback, so Icon-Only mode always shows something scannable.
-  - Configurable display modes, all functional: `Taskbar` (icon + label), `IconOnly` (icon + tooltip), `Dropdown` (single button with a window-count badge opening an Umbra `MenuPopup`), and `Auto` (starts as Taskbar and condenses toward IconOnly/Dropdown as toolbar width tightens).
   - Left-click to focus, bring to front, or toggle minimize/restore; right-click opens a per-state context menu (Minimize/Restore, Close; or Select Active Tab / Close All Tabs for dock groups).
+- **Dedicated "Minimize All Windows" Widget**:
+  - Independent `ToolbarWidget` (`UmbraMinimizeAllWindowsWidget`) that can be placed anywhere on any Umbra toolbar.
+  - One-click bulk minimize of all open, manageable windows to instantly clear the viewport during cutscenes or high-intensity combat encounters.
+  - Smart toggle behavior: when all windows are minimized, clicking the button restores the previously open windows back to the viewport with active dock tabs intact.
+  - Dynamically updates tooltip ("Minimize All Windows" vs "Restore Windows") and visual state.
 
 ---
 
@@ -71,6 +75,7 @@ Umbra Window Manager uses a dual-layer observation and orchestration architectur
 5. **`DalamudWindowTracker`**: Reflection service that runs every 2 seconds (`[OnTick]`) and on demand. Safely checks service initialization tokens, discovers `WindowSystem`s across loaded plugins, and injects minimize `TitleBarButton`s.
 6. **`ImGuiContextMonitor`**: Per-frame draw hook (`[OnDraw]`) that checks native ImGui pointers for collapses and dock memberships using pooled collections to prevent draw-loop allocations.
 7. **`WindowManagerWidget`**: Umbra `ToolbarWidget` maintaining a dynamic `Una.Drawing.Node` hierarchy with live style updates, tooltip management, and click handlers.
+8. **`MinimizeAllWindowsWidget`**: Dedicated Umbra `ToolbarWidget` providing a standalone "Show Desktop" / "Minimize All" button that can be positioned anywhere on user toolbars.
 
 ---
 
@@ -87,13 +92,16 @@ Umbra Window Manager uses a dual-layer observation and orchestration architectur
 │   │       ├── WindowInfoHelper.cs          # ImGui title & ID parsing utilities
 │   │       └── WindowManagerService.cs      # Core state machine & lifecycle service
 │   ├── Widgets/
+│   │   ├── MinimizeAllWindowsWidget.cs      # Standalone minimize all toolbar widget
 │   │   └── WindowManagerWidget.cs           # Umbra toolbar widget (Una.Drawing UI)
 │   └── Umbra.WindowManager.csproj
 ├── Umbra.WindowManager.Tests/               # xUnit unit test project
+│   ├── AssemblyInfo.cs                      # Test collection sequential execution
 │   ├── DalamudWindowTrackerTests.cs         # Reflection & injection unit tests
 │   ├── DockGroupTests.cs                    # DockGroup model & lifecycle tests
+│   ├── MinimizeAllWindowsWidgetTests.cs     # Standalone minimize all widget tests
 │   ├── WindowInfoHelperTests.cs             # Title & ID parser tests
-│   ├── WindowManagerServiceTests.cs         # Service state machine & GC tests
+│   ├── WindowManagerServiceTests.cs         # Service state machine & bulk minimize tests
 │   ├── WindowManagerWidgetTests.cs          # Widget node hierarchy & config tests
 │   └── Umbra.WindowManager.Tests.csproj
 ├── docs/
@@ -180,7 +188,7 @@ To load the built `Umbra.WindowManager.dll`:
 
 ## Configuration Options
 
-Umbra Window Manager provides the following settings via Umbra's Widget Settings UI:
+### Window Manager Widget
 
 | Setting | Type | Default | Description |
 |---|---|---|---|
@@ -188,6 +196,15 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 | `WindowManager.MaxTitleWidth` | Integer | `140` | Maximum pixel width for window title labels before truncation (range: 60–300 px). |
 | `WindowManager.GroupDockedTabs` | Boolean | `true` | Whether docked tabs collapse into a single split-view toolbar button (icon + title per member at two, icons only past two) and are minimized/restored collectively. When off, each docked tab keeps its own button. |
 | `WindowManager.Decorate` | Boolean | `true` | Whether window buttons (and the dropdown button) receive Umbra background and border styling (`.decorated`). |
+| `WindowManager.Blacklist` | String | `""` | Comma-separated list of window titles, IDs, or plugin internal names to hide from the toolbar. |
+
+### Minimize All Windows Widget
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `Decorate` | Boolean | `true` | Whether the button receives Umbra background and border styling (`.decorated`). |
+| `MinimizeAll.Toggle` | Boolean | `true` | Allow toggling between minimizing all windows and restoring previously minimized windows. |
+| `MinimizeAll.AutoHide` | Boolean | `true` | Automatically hide the button from the toolbar when no windows are open. |
 
 ---
 
@@ -199,10 +216,11 @@ Umbra Window Manager provides the following settings via Umbra's Widget Settings
 | **Left-Click** | Open & unfocused window | Brings window to front and focuses it. |
 | **Left-Click** | Open & focused window | Minimizes window to the toolbar. |
 | **Left-Click** | Docked tab group | Toggles minimize / restore for all tabs in the dock container. |
+| **Left-Click** | Minimize All Windows widget | Minimizes all open plugin windows at once; toggles to restore previously minimized windows. |
 | **Right-Click** | Open window | Context menu: **Minimize**, **Close**. |
 | **Right-Click** | Minimized window | Context menu: **Restore**, **Close**. |
 | **Right-Click** | Docked tab group | Context menu: **Select Active Tab**, **Close All Tabs**. |
-| **Title Bar Button** | Any window | Clicks the injected minimize button (`FontAwesomeIcon.WindowMinimize`) to minimize. |
+| **Title Bar Button** | Any window | Clicks the original title bar button to minimize to the toolbar. |
 | **Double-Click Title Bar** | Native ImGui collapse | Intercepted and routed to full window minimize. |
 
 ### Raw-ImGui windows (experimental)

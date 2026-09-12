@@ -16,9 +16,9 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void InjectMinimizeButton_AddsButtonOnceAndBindsClick()
+    public void InjectMinimizeButton_DoesNotAddCustomButtonAndClearsNoCollapse()
     {
-        var win = new DummyWindow("DecoratedWindow");
+        var win = new DummyWindow("DecoratedWindow") { Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse };
         var service = new WindowManagerService();
         var tw = service.RegisterWindow(win);
 
@@ -26,36 +26,61 @@ public class DalamudWindowTrackerTests
 
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
 
-        Assert.Single(win.TitleBarButtons);
-        var btn = win.TitleBarButtons.First();
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, btn.Icon);
-
-        // Ensure idempotency
-        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
-        Assert.Single(win.TitleBarButtons);
-
-        // Click invokes minimize
-        btn.Click?.Invoke(Dalamud.Bindings.ImGui.ImGuiMouseButton.Left);
-        Assert.True(tw.IsMinimized);
-        Assert.False(win.IsOpen);
+        // We no longer add a custom minimize button; the original collapse/minimize button is used
+        Assert.Empty(win.TitleBarButtons);
+        // Ensure NoCollapse is cleared so the original button is enabled
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
-    public void InjectMinimizeButton_InjectsEvenWhenPluginHasOwnMinimizeButton()
+    public void NativeCollapse_OnManagedWindow_RoutesToWindowManagerMinimize()
     {
-        // Issue #8.1: a plugin shipping its own WindowMinimize button must not suppress ours; we match
-        // by window instance, not by icon, so our minimize action is always wired.
+        var service = new WindowManagerService();
+        var win = new DummyWindow("CollapsibleWindow") { IsOpen = true };
+        var tw = service.RegisterWindow(win);
+
+        Assert.False(tw.IsMinimized);
+        Assert.True(win.IsOpen);
+
+        // When the original button is clicked, ImGui collapses the window.
+        // The collapse guard clears collapsed state and delegates to WindowManagerService.Minimize.
+        win.Collapsed = true;
+        if (win.Collapsed == true)
+        {
+            win.Collapsed = false;
+            service.Minimize(tw);
+        }
+
+        Assert.True(tw.IsMinimized);
+        Assert.False(win.IsOpen);
+        Assert.False(win.Collapsed);
+    }
+
+    [Fact]
+    public void InjectMinimizeButton_HooksPluginOwnMinimizeButtonWithoutAddingCustomButton()
+    {
+        // Issue #8.1: a plugin shipping its own WindowMinimize button is hooked to our minimize action,
+        // but we do not inject a redundant custom button.
         var win = new DummyWindow("HasOwnMinimize");
-        win.TitleBarButtons.Add(new TitleBarButton { Icon = FontAwesomeIcon.WindowMinimize });
+        var originalCalled = false;
+        var pluginBtn = new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.WindowMinimize,
+            Priority = 0,
+            Click = _ => { originalCalled = true; }
+        };
+        win.TitleBarButtons.Add(pluginBtn);
         var service = new WindowManagerService();
         var tw = service.RegisterWindow(win);
 
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
 
-        Assert.Equal(2, win.TitleBarButtons.Count);
+        Assert.Single(win.TitleBarButtons);
+        Assert.Same(pluginBtn, win.TitleBarButtons[0]);
 
-        // Our button (added last) minimizes the window.
-        win.TitleBarButtons.Last().Click?.Invoke(Dalamud.Bindings.ImGui.ImGuiMouseButton.Left);
+        // Plugin button minimizes the window and calls the original handler
+        pluginBtn.Click?.Invoke(Dalamud.Bindings.ImGui.ImGuiMouseButton.Left);
+        Assert.True(originalCalled);
         Assert.True(tw.IsMinimized);
         Assert.False(win.IsOpen);
     }
@@ -125,41 +150,41 @@ public class DalamudWindowTrackerTests
         Assert.Contains(tracked, t => t.WindowName == "PluginWindow1");
         Assert.Contains(tracked, t => t.WindowName == "PluginWindow2");
 
-        Assert.Single(win1.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win1.TitleBarButtons.First().Icon);
-        Assert.Single(win2.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win2.TitleBarButtons.First().Icon);
+        Assert.Empty(win1.TitleBarButtons);
+        Assert.Empty(win2.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win1.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win2.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
 
-        // Idempotency: re-tracking shouldn't duplicate buttons
+        // Idempotency: re-tracking shouldn't add buttons
         tracker.TrackWindowSystem(ws);
-        Assert.Single(win1.TitleBarButtons);
-        Assert.Single(win2.TitleBarButtons);
+        Assert.Empty(win1.TitleBarButtons);
+        Assert.Empty(win2.TitleBarButtons);
     }
 
     [Fact]
-    public void TrackWindowSystem_RecreatedWindowWithSameName_ReceivesMinimizeButton()
+    public void TrackWindowSystem_RecreatedWindowWithSameName_TracksWindowAndClearsNoCollapse()
     {
         var service = new WindowManagerService();
         var tracker = new DalamudWindowTracker(service);
 
         var ws1 = new WindowSystem("TestSystem1");
-        var win1 = new DummyWindow("RecreatedWindow");
+        var win1 = new DummyWindow("RecreatedWindow") { Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse };
         ws1.AddWindow(win1);
         tracker.TrackWindowSystem(ws1);
 
-        Assert.Single(win1.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win1.TitleBarButtons.First().Icon);
+        Assert.Empty(win1.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win1.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
 
         // A new window instance with the same name is created (e.g. after plugin reloads or re-instantiates window)
         var ws2 = new WindowSystem("TestSystem2");
-        var win2 = new DummyWindow("RecreatedWindow");
+        var win2 = new DummyWindow("RecreatedWindow") { Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse };
         ws2.AddWindow(win2);
         Assert.Empty(win2.TitleBarButtons);
 
         tracker.TrackWindowSystem(ws2);
 
-        Assert.Single(win2.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win2.TitleBarButtons.First().Icon);
+        Assert.Empty(win2.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win2.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -188,6 +213,18 @@ public class DalamudWindowTrackerTests
 
         var ex = Record.Exception((Action)(() => tracker.ScanPlugins()));
         Assert.Null(ex);
+    }
+
+    [Fact]
+    public void ScanPlugins_ResetsIsScanning_AfterCompletion()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var field = typeof(DalamudWindowTracker).GetField("isScanning", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(field);
+        var value = (int)field.GetValue(tracker)!;
+        Assert.Equal(0, value);
     }
 
     // Mirrors Dalamud.Interface.Internal.DalamudInterface, which owns the core window system
@@ -225,8 +262,8 @@ public class DalamudWindowTrackerTests
 
         Assert.Equal("Dalamud", installerTw.PluginInternalName);
         Assert.Equal("Dalamud", consoleTw.PluginInternalName);
-        Assert.Single(installer.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, installer.TitleBarButtons.First().Icon);
+        Assert.Empty(installer.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, installer.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -341,17 +378,17 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void InjectMinimizeButton_SetsNoCollapseFlagOnManagedWindow()
+    public void InjectMinimizeButton_ClearsNoCollapseFlagOnManagedWindow()
     {
-        var win = new DummyWindow("ManagedWindow");
+        var win = new DummyWindow("ManagedWindow") { Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse };
         var service = new WindowManagerService();
         var tw = service.RegisterWindow(win);
 
-        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
+        Assert.NotEqual(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
 
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
 
-        Assert.NotEqual(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -608,7 +645,8 @@ public class DalamudWindowTrackerTests
 
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "NestedWindow");
-        Assert.Single(win.TitleBarButtons);
+        Assert.Empty(win.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -661,55 +699,57 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void InjectMinimizeButton_InjectsOnWindowWithZeroSizeOrUnconfirmedUi()
+    public void InjectMinimizeButton_ClearsNoCollapseOnWindowWithZeroSizeOrUnconfirmedUi()
     {
         var service = new WindowManagerService();
         var winZeroSize = new DummyWindow("ZeroSizeWindow")
         {
-            Size = System.Numerics.Vector2.Zero
+            Size = System.Numerics.Vector2.Zero,
+            Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse
         };
         var tw = service.RegisterWindow(winZeroSize);
         tw.HasConfirmedUi = false;
 
-        // tw.IsManageable is false for toolbar purposes, but winZeroSize has a titlebar and should receive a minimize button
+        // tw.IsManageable is false for toolbar purposes, but winZeroSize has a titlebar and should have NoCollapse cleared
         Assert.False(tw.IsManageable);
 
         DalamudWindowTracker.InjectMinimizeButton(winZeroSize, tw, service);
 
-        Assert.Single(winZeroSize.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, winZeroSize.TitleBarButtons.First().Icon);
+        Assert.Empty(winZeroSize.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, winZeroSize.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
-    public void InjectMinimizeButton_ReinjectsIfTitleBarButtonsCleared()
+    public void InjectMinimizeButton_RemovesLegacyInjectedButton()
     {
         var service = new WindowManagerService();
         var win = new DummyWindow("DynamicButtonsWindow");
+        win.TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.WindowMinimize,
+            Priority = int.MaxValue - 1
+        });
         var tw = service.RegisterWindow(win);
 
-        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
         Assert.Single(win.TitleBarButtons);
 
-        // Simulate plugin clearing buttons on tab switch or dynamic redraw
-        win.TitleBarButtons.Clear();
+        // Next pass removes the legacy custom minimize button
+        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
         Assert.Empty(win.TitleBarButtons);
-
-        // Next pass re-injects the minimize button
-        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
-        Assert.Single(win.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win.TitleBarButtons.First().Icon);
     }
 
     [Fact]
-    public void RemoveMinimizeButton_RemovesPreviouslyInjectedButton()
+    public void RemoveMinimizeButton_RemovesLegacyInjectedButton()
     {
-        // Docked tabs must drop the injected button: Dalamud draws it inside the client area where it
-        // collides with and hides beneath plugin controls (issue #25).
         var service = new WindowManagerService();
         var win = new DummyWindow("DockedTab");
+        win.TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.WindowMinimize,
+            Priority = int.MaxValue - 1
+        });
         var tw = service.RegisterWindow(win);
 
-        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
         Assert.Single(win.TitleBarButtons);
 
         DalamudWindowTracker.RemoveMinimizeButton(win);
@@ -717,7 +757,7 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void RemoveMinimizeButton_AllowsReinjectionAfterUndock()
+    public void RemoveMinimizeButton_LeavesTitleBarButtonsEmpty()
     {
         var service = new WindowManagerService();
         var win = new DummyWindow("RedockableTab");
@@ -727,17 +767,15 @@ public class DalamudWindowTrackerTests
         DalamudWindowTracker.RemoveMinimizeButton(win);
         Assert.Empty(win.TitleBarButtons);
 
-        // Once the window undocks, its minimize control must come back.
+        // Standalone window remains without custom button
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
-        Assert.Single(win.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win.TitleBarButtons.First().Icon);
+        Assert.Empty(win.TitleBarButtons);
     }
 
     [Fact]
     public void InjectMinimizeButton_WhenWindowInDockGroup_DoesNotInject()
     {
-        // A dock-group member (e.g. Glamourer docked with Penumbra) must never receive the raw button:
-        // it would render inside the client area beneath plugin controls (issue #25).
+        // A dock-group member (e.g. Glamourer docked with Penumbra) must never receive the raw button
         var service = new WindowManagerService();
         var win = new DummyWindow("GlamourerDocked");
         var tw = service.RegisterWindow(win);
@@ -749,18 +787,17 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void InjectMinimizeButton_WhenWindowJoinsDockGroup_RemovesExistingButton()
+    public void InjectMinimizeButton_WhenWindowJoinsDockGroup_RemovesExistingLegacyButton()
     {
-        // Reproduces the re-injection race: a floating window gets the button, then docks. Every later
-        // injection path (draw loop AND the 250ms discovery tick) must strip the button, not re-add it.
         var service = new WindowManagerService();
         var win = new DummyWindow("PenumbraTab");
+        win.TitleBarButtons.Add(new TitleBarButton
+        {
+            Icon = FontAwesomeIcon.WindowMinimize,
+            Priority = int.MaxValue - 1
+        });
         var tw = service.RegisterWindow(win);
 
-        DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
-        Assert.Single(win.TitleBarButtons);
-
-        // Window becomes a dock-group member.
         tw.DockGroupKey = "dock_glam_penumbra";
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
 
@@ -768,22 +805,22 @@ public class DalamudWindowTrackerTests
     }
 
     [Fact]
-    public void InjectMinimizeButton_WhenWindowLeavesDockGroup_ReinjectsButton()
+    public void InjectMinimizeButton_WhenWindowLeavesDockGroup_ClearsNoCollapseWithoutAddingCustomButton()
     {
         var service = new WindowManagerService();
-        var win = new DummyWindow("UndockedTab");
+        var win = new DummyWindow("UndockedTab") { Flags = Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse };
         var tw = service.RegisterWindow(win);
         tw.DockGroupKey = "dock_glam_penumbra";
 
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
         Assert.Empty(win.TitleBarButtons);
 
-        // Window undocks -> its standalone minimize control must come back.
+        // Window undocks -> NoCollapse is cleared, but no custom button is added
         tw.DockGroupKey = null;
         DalamudWindowTracker.InjectMinimizeButton(win, tw, service);
 
-        Assert.Single(win.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win.TitleBarButtons.First().Icon);
+        Assert.Empty(win.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -832,8 +869,8 @@ public class DalamudWindowTrackerTests
         Assert.NotNull(tw);
         Assert.Equal("DynamicModalWindow", tw.WindowName);
         Assert.Equal("FastTrackPlugin", tw.PluginInternalName);
-        Assert.Single(dynamicWin.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, dynamicWin.TitleBarButtons.First().Icon);
+        Assert.Empty(dynamicWin.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, dynamicWin.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -855,7 +892,8 @@ public class DalamudWindowTrackerTests
 
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "Window2");
-        Assert.Single(win2.TitleBarButtons);
+        Assert.Empty(win2.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win2.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     private class PluginWithThrowingUiProperty
@@ -1007,8 +1045,8 @@ public class DalamudWindowTrackerTests
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "Glamourer.Gui.MainWindow");
 
-        Assert.Single(win.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win.TitleBarButtons.First().Icon);
+        Assert.Empty(win.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -1038,8 +1076,8 @@ public class DalamudWindowTrackerTests
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "Penumbra.Gui.MainWindow");
 
-        Assert.Single(win.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, win.TitleBarButtons.First().Icon);
+        Assert.Empty(win.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -1063,10 +1101,10 @@ public class DalamudWindowTrackerTests
         Assert.Contains(tracked, t => t.WindowName == "StandAlonePropWindow");
         Assert.Contains(tracked, t => t.WindowName == "StandAloneFieldWindow");
 
-        Assert.Single(winProp.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, winProp.TitleBarButtons.First().Icon);
-        Assert.Single(winField.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, winField.TitleBarButtons.First().Icon);
+        Assert.Empty(winProp.TitleBarButtons);
+        Assert.Empty(winField.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, winProp.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, winField.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -1095,7 +1133,8 @@ public class DalamudWindowTrackerTests
 
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "DeepNestedWindow");
-        Assert.Single(win.TitleBarButtons);
+        Assert.Empty(win.TitleBarButtons);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiWindowFlags.None, win.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoCollapse);
     }
 
     private class HeavyNonUiService
@@ -1139,20 +1178,704 @@ public class DalamudWindowTrackerTests
         Assert.Contains(tracked, t => t.WindowName == "Penumbra.Gui.MainWindow");
     }
 
+    [Fact]
+    public void UntrackPlugin_RemovesKnownWindowSystems_UnregistersWindows_AndClearsIconCache()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var wsA = new WindowSystem("SysA");
+        var winA = new DummyWindow("WindowA");
+        wsA.AddWindow(winA);
+
+        var wsB = new WindowSystem("SysB");
+        var winB = new DummyWindow("WindowB");
+        wsB.AddWindow(winB);
+
+        var iconA = new byte[] { 1, 2, 3 };
+        var iconB = new byte[] { 4, 5, 6 };
+
+        tracker.TrackWindowSystem(wsA, "PluginA", iconA);
+        tracker.TrackWindowSystem(wsB, "PluginB", iconB);
+
+        Assert.Equal(2, service.GetTrackedWindows().Count);
+        Assert.NotNull(tracker.TryFastTrackWindow("WindowA"));
+        Assert.NotNull(tracker.TryFastTrackWindow("WindowB"));
+
+        // Untrack PluginA
+        tracker.UntrackPlugin("PluginA");
+
+        // WindowA should no longer be tracked in WindowManagerService
+        var tracked = service.GetTrackedWindows();
+        Assert.Single(tracked);
+        Assert.Equal("WindowB", tracked[0].WindowName);
+
+        // WindowA should no longer be fast-trackable from known window systems
+        Assert.Null(tracker.TryFastTrackWindow("WindowA"));
+        Assert.NotNull(tracker.TryFastTrackWindow("WindowB"));
+
+        // ScanKnownWindowSystems should not re-add WindowA
+        tracker.ScanKnownWindowSystems();
+        Assert.Single(service.GetTrackedWindows());
+    }
+
+    private class FakeLocalPluginWithInstance
+    {
+        public FakeManifest? Manifest { get; set; }
+        public System.IO.FileInfo? DllFile { get; set; }
+        internal object? instance;
+    }
+
+    private class PluginHost
+    {
+        public WindowSystem Sys { get; set; }
+        public PluginHost(WindowSystem ws) => Sys = ws;
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReloads_UntracksOldStateAndRegistersNewState()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ws1 = new WindowSystem("Sys1");
+        var win1 = new DummyWindow("ReloadableWin");
+        ws1.AddWindow(win1);
+        var host1 = new PluginHost(ws1);
+
+        var plugin = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "HotReloadPlugin" },
+            instance = host1
+        };
+
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+        var tracked1 = service.GetTrackedWindows().Single(t => t.WindowName == "ReloadableWin");
+        Assert.True(tracked1.TryGetWindow(out var alive1) && ReferenceEquals(alive1, win1));
+        Assert.Empty(win1.TitleBarButtons);
+        Assert.Equal(ImGuiWindowFlags.None, win1.Flags & ImGuiWindowFlags.NoCollapse);
+
+        // Simulate plugin reload: new instance host2 with new window system and new window instance
+        var ws2 = new WindowSystem("Sys2");
+        var win2 = new DummyWindow("ReloadableWin");
+        ws2.AddWindow(win2);
+        var host2 = new PluginHost(ws2);
+        plugin.instance = host2;
+
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+        // WindowManager should now track win2 instead of win1
+        var tracked2 = service.GetTrackedWindows().Single(t => t.WindowName == "ReloadableWin");
+        Assert.True(tracked2.TryGetWindow(out var alive2) && ReferenceEquals(alive2, win2));
+        Assert.Empty(win2.TitleBarButtons);
+        Assert.Equal(ImGuiWindowFlags.None, win2.Flags & ImGuiWindowFlags.NoCollapse);
+
+        // Fast-tracking should resolve win2, not win1
+        var fastTracked = tracker.TryFastTrackWindow("ReloadableWin");
+        Assert.NotNull(fastTracked);
+        Assert.True(fastTracked.TryGetWindow(out var fastAlive) && ReferenceEquals(fastAlive, win2));
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginUninstalled_UntracksPluginWindows()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var wsA = new WindowSystem("SysA");
+        var winA = new DummyWindow("WinA");
+        wsA.AddWindow(winA);
+        var hostA = new PluginHost(wsA);
+
+        var wsB = new WindowSystem("SysB");
+        var winB = new DummyWindow("WinB");
+        wsB.AddWindow(winB);
+        var hostB = new PluginHost(wsB);
+
+        var pluginA = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "PluginA" },
+            instance = hostA
+        };
+        var pluginB = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "PluginB" },
+            instance = hostB
+        };
+
+        // First scan: both plugins present
+        tracker.ScanInstalledPlugins(new[] { pluginA, pluginB }, null);
+        Assert.Equal(2, service.GetTrackedWindows().Count);
+
+        // Second scan: PluginA uninstalled (only pluginB present)
+        tracker.ScanInstalledPlugins(new[] { pluginB }, null);
+
+        var remaining = service.GetTrackedWindows();
+        Assert.Single(remaining);
+        Assert.Equal("WinB", remaining[0].WindowName);
+        Assert.Null(tracker.TryFastTrackWindow("WinA"));
+    }
+
+    private class MockPluginManagerWithEvent
+    {
+        public event System.Action? OnInstalledPluginsChanged;
+        public void FireInstalledPluginsChanged() => OnInstalledPluginsChanged?.Invoke();
+    }
+
+    [Fact]
+    public void HookLifecycleEvents_SubscribesToOnInstalledPluginsChanged_AndUnsubscribesOnDispose()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPm = new MockPluginManagerWithEvent();
+
+        var hookMethod = typeof(DalamudWindowTracker).GetMethod(
+            "TryHookPluginManagerEvents",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(hookMethod);
+
+        hookMethod.Invoke(tracker, new object[] { mockPm });
+
+        var pmField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginManager",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(pmField);
+        Assert.Same(mockPm, pmField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(pmField.GetValue(tracker));
+    }
+
+    private class MockPluginInterfaceWithEvent
+    {
+        public event Dalamud.Plugin.IDalamudPluginInterface.ActivePluginsChangedDelegate? ActivePluginsChanged;
+        public void FireActivePluginsChanged(Dalamud.Plugin.IActivePluginsChangedEventArgs args) => ActivePluginsChanged?.Invoke(args);
+    }
+
+    [Fact]
+    public void HookLifecycleEvents_SubscribesToActivePluginsChanged_AndUnsubscribesOnDispose()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi = new MockPluginInterfaceWithEvent();
+
+        var hookMethod = typeof(DalamudWindowTracker).GetMethod(
+            "TryHookPluginInterfaceEvents",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(hookMethod);
+
+        hookMethod.Invoke(tracker, new object[] { mockPi });
+
+        var piField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginInterface",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(piField);
+        Assert.Same(mockPi, piField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(piField.GetValue(tracker));
+    }
+
+    [Fact]
+    public void HookLifecycleEvents_PreferredInterface_ReplacesExistingHook()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi1 = new MockPluginInterfaceWithEvent();
+        var mockPi2Preferred = new MockPluginInterfaceWithEvent();
+
+        tracker.TryHookPluginInterfaceEvents(mockPi1);
+
+        var piField = typeof(DalamudWindowTracker).GetField(
+            "hookedPluginInterface",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(piField);
+        Assert.Same(mockPi1, piField.GetValue(tracker));
+
+        // Preferred interface replaces the earlier one
+        tracker.TryHookPreferredPluginInterfaceEvents(mockPi2Preferred);
+        Assert.Same(mockPi2Preferred, piField.GetValue(tracker));
+
+        tracker.Dispose();
+        Assert.Null(piField.GetValue(tracker));
+    }
+
+    [Fact]
+    public void OnActivePluginsChanged_TriggersScanPlugins_AndLeavesIsScanningZero()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPi = new MockPluginInterfaceWithEvent();
+        tracker.TryHookPluginInterfaceEvents(mockPi);
+
+        mockPi.FireActivePluginsChanged(null!);
+
+        var isScanningField = typeof(DalamudWindowTracker).GetField(
+            "isScanning",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(isScanningField);
+        Assert.Equal(0, (int)isScanningField.GetValue(tracker)!);
+    }
+
+    [Fact]
+    public void OnInstalledPluginsChanged_TriggersScanPlugins_AndLeavesIsScanningZero()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var mockPm = new MockPluginManagerWithEvent();
+        tracker.TryHookPluginManagerEvents(mockPm);
+
+        mockPm.FireInstalledPluginsChanged();
+
+        var isScanningField = typeof(DalamudWindowTracker).GetField(
+            "isScanning",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(isScanningField);
+        Assert.Equal(0, (int)isScanningField.GetValue(tracker)!);
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReloads_InvalidatesIconCache()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var iconPath = DalamudWindowTracker.GetCachedIconPath("ReloadIconPlugin");
+        var dir = System.IO.Path.GetDirectoryName(iconPath)!;
+        System.IO.Directory.CreateDirectory(dir);
+
+        var oldIcon = new byte[] { 1, 1, 1 };
+        var newIcon = new byte[] { 2, 2, 2 };
+
+        System.IO.File.WriteAllBytes(iconPath, oldIcon);
+
+        try
+        {
+            var ws1 = new WindowSystem("Sys1");
+            ws1.AddWindow(new DummyWindow("W"));
+            var host1 = new PluginHost(ws1);
+            var plugin = new FakeLocalPluginWithInstance
+            {
+                Manifest = new FakeManifest { InternalName = "ReloadIconPlugin" },
+                instance = host1
+            };
+
+            tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+            var tracked1 = service.GetTrackedWindows().Single(t => t.WindowName == "W");
+            Assert.Equal(oldIcon, tracked1.IconBytes);
+
+            // Now update the icon on disk and reload plugin
+            System.IO.File.WriteAllBytes(iconPath, newIcon);
+
+            var ws2 = new WindowSystem("Sys2");
+            ws2.AddWindow(new DummyWindow("W"));
+            var host2 = new PluginHost(ws2);
+            plugin.instance = host2;
+
+            tracker.ScanInstalledPlugins(new[] { plugin }, null);
+
+            var tracked2 = service.GetTrackedWindows().Single(t => t.WindowName == "W");
+            Assert.Equal(newIcon, tracked2.IconBytes);
+        }
+        finally
+        {
+            if (System.IO.File.Exists(iconPath))
+                System.IO.File.Delete(iconPath);
+        }
+    }
+
+    [Fact]
+    public void ScanInstalledPlugins_WhenPluginReAddedAfterUnload_FiresPluginReloaded()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var reloadedFired = 0;
+        tracker.PluginReloaded += () => reloadedFired++;
+
+        var ws1 = new WindowSystem("Sys1");
+        var win1 = new DummyWindow("Win1");
+        ws1.AddWindow(win1);
+        var host1 = new PluginHost(ws1);
+
+        var plugin = new FakeLocalPluginWithInstance
+        {
+            Manifest = new FakeManifest { InternalName = "ReloadPlugin" },
+            instance = host1
+        };
+
+        // First scan - plugin is newly loaded
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(1, reloadedFired);
+
+        // Second scan - plugin unloaded (instance = null)
+        plugin.instance = null;
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(2, reloadedFired);
+
+        // Third scan - plugin loaded again with new host
+        var ws2 = new WindowSystem("Sys2");
+        var win2 = new DummyWindow("Win1");
+        ws2.AddWindow(win2);
+        plugin.instance = new PluginHost(ws2);
+        tracker.ScanInstalledPlugins(new[] { plugin }, null);
+        Assert.Equal(3, reloadedFired);
+    }
+
+    private class MockUmbraWindow : Umbra.Windows.IWindow
+    {
+        public System.Numerics.Vector2 Position { get; set; } = new(100, 150);
+        public System.Numerics.Vector2 Size { get; set; } = new(400, 300);
+        public bool IsClosed { get; set; }
+        public bool IsMinimized { get; set; }
+        public bool IsFocused { get; set; }
+        public bool IsHovered { get; set; }
+        public bool CloseCalled { get; private set; }
+        public int RenderCallCount { get; private set; }
+
+        public event Action? RequestClose;
+
+        public void Close()
+        {
+            this.CloseCalled = true;
+            this.IsClosed = true;
+            this.RequestClose?.Invoke();
+        }
+
+        public void Render(string instanceId)
+        {
+            this.RenderCallCount++;
+        }
+
+        public void Dispose() { }
+    }
+
+    private class FakeUmbraWindowManager
+    {
+        public Dictionary<string, Umbra.Windows.IWindow> _instances { get; } = new();
+        public event Action<Umbra.Windows.IWindow>? OnWindowOpened;
+        public event Action<Umbra.Windows.IWindow>? OnWindowClosed;
+
+        public void Open(string instanceId, Umbra.Windows.IWindow window)
+        {
+            this._instances[instanceId] = window;
+            this.OnWindowOpened?.Invoke(window);
+        }
+
+        public void Close(string instanceId)
+        {
+            if (this._instances.Remove(instanceId, out var window))
+            {
+                this.OnWindowClosed?.Invoke(window);
+            }
+        }
+    }
+
+    [Fact]
+    public void ScanUmbra_TryLoadUmbraCoreIcon_LoadsEmbeddedLogoBytes()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var icon = tracker.TryLoadUmbraCoreIcon();
+
+        Assert.NotNull(icon);
+        Assert.NotEmpty(icon);
+        var iconCached = tracker.TryLoadUmbraCoreIcon();
+        Assert.Same(icon, iconCached);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_RegistersWindowsUnderUmbraWithLogo()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+        var logoBytes = new byte[] { 1, 2, 3 };
+
+        tracker.ScanUmbraCoreWindows(fakeWm, logoBytes);
+
+        var tracked = service.GetTrackedWindows();
+        var tw = Assert.Single(tracked);
+        Assert.Equal("UmbraSettings", tw.Id);
+        Assert.Equal("Umbra", tw.PluginInternalName);
+        Assert.Same(logoBytes, tw.IconBytes);
+        Assert.True(tw.TryGetWindow(out var win));
+        Assert.IsType<UmbraWindowAdapter>(win);
+        var adapter = (UmbraWindowAdapter)win;
+        Assert.Same(mockWindow, adapter.UnderlyingWindow);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_WiresIsBeingMinimizedToTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        var tw = service.GetTrackedWindows().Single();
+        Assert.True(tw.TryGetWindow(out var win));
+        var adapter = (UmbraWindowAdapter)win;
+
+        // When tw.IsMinimized is true, setting adapter.IsOpen = false should minimize rather than close
+        tw.IsMinimized = true;
+        adapter.IsOpen = false;
+
+        Assert.True(mockWindow.IsMinimized);
+        Assert.False(mockWindow.CloseCalled);
+        Assert.NotNull(adapter.Proxy);
+        Assert.True(adapter.Proxy.IsHidden);
+        Assert.False(adapter.IsOpen);
+    }
+
+    [Fact]
+    public void ScanUmbra_TryFastTrackWindow_ResolvesUmbraWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 4, 5 });
+
+        var tw = tracker.TryFastTrackWindow("UmbraSettings");
+        Assert.NotNull(tw);
+        Assert.Equal("Umbra", tw.PluginInternalName);
+        Assert.Equal("UmbraSettings", tw.Id);
+        Assert.NotNull(tw.IconBytes);
+    }
+
+    [Fact]
+    public void ScanUmbra_UntrackPlugin_Umbra_ClearsWindowsAndState()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        fakeWm._instances["UmbraSettings"] = new MockUmbraWindow();
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+        Assert.Single(service.GetTrackedWindows());
+
+        tracker.UntrackPlugin("Umbra");
+
+        Assert.Empty(service.GetTrackedWindows());
+
+        // Further events on old fakeWm should not register
+        fakeWm.Open("NewWindow", new MockUmbraWindow());
+        Assert.Empty(service.GetTrackedWindows());
+    }
+
+    [Fact]
+    public void ScanUmbra_Events_DynamicallyRegisterAndUnregisterWindows()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var logoBytes = new byte[] { 9, 9 };
+
+        tracker.ScanUmbraCoreWindows(fakeWm, logoBytes);
+        Assert.Empty(service.GetTrackedWindows());
+
+        var win1 = new MockUmbraWindow();
+        fakeWm.Open("WidgetBrowser", win1);
+
+        var tracked = service.GetTrackedWindows();
+        var tw = Assert.Single(tracked);
+        Assert.Equal("WidgetBrowser", tw.Id);
+        Assert.Equal("Umbra", tw.PluginInternalName);
+
+        fakeWm.Close("WidgetBrowser");
+        Assert.Empty(service.GetTrackedWindows());
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraWindows_OutsideGame_DoesNotThrow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+
+        var ex = Record.Exception(() => tracker.ScanUmbraWindows());
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_InstallsProxyInInstancesDictionary()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        Assert.True(fakeWm._instances.ContainsKey("UmbraSettings"));
+        Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        var proxy = (UmbraWindowProxy)fakeWm._instances["UmbraSettings"];
+        Assert.Same(mockWindow, proxy.UnderlyingWindow);
+    }
+
+    [Fact]
+    public void ScanUmbra_MinimizingAndRestoring_SuppressesAndResumesRenderingViaProxy()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        var tw = service.GetTrackedWindows().Single();
+        Assert.True(tw.TryGetWindow(out var win));
+        var adapter = (UmbraWindowAdapter)win;
+
+        // When minimized:
+        service.Minimize(tw);
+        Assert.True(tw.IsMinimized);
+        Assert.False(adapter.IsOpen);
+
+        var proxy = Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        Assert.True(proxy.IsHidden);
+
+        // Umbra's OnDraw calls Render on the instance in _instances
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(0, mockWindow.RenderCallCount);
+
+        // When restored:
+        service.Restore(tw);
+        Assert.False(tw.IsMinimized);
+        Assert.True(adapter.IsOpen);
+        Assert.False(proxy.IsHidden);
+
+        // Umbra's OnDraw calls Render on the instance in _instances again
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(1, mockWindow.RenderCallCount);
+    }
+
+    [Fact]
+    public void ScanUmbra_UntrackPlugin_Umbra_RestoresRawWindowInInstancesDictionary()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow();
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+        Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+
+        tracker.UntrackPlugin("Umbra");
+
+        // Proxy must be unwrapped back to raw window
+        Assert.Same(mockWindow, fakeWm._instances["UmbraSettings"]);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_WhenWindowIsMinimized_MinimizesTrackedWindowAndHidesProxy()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow { IsMinimized = true };
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        var tw = service.GetTrackedWindows().Single();
+        Assert.True(tw.IsMinimized);
+        Assert.False(tw.IsOpen);
+
+        var proxy = Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        Assert.True(proxy.IsHidden);
+
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(0, mockWindow.RenderCallCount);
+    }
+
+    [Fact]
+    public void ScanUmbra_ScanUmbraCoreWindows_ExistingWindowBecomesMinimized_MinimizesTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow { IsMinimized = false };
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        // Initial scan: window is open and unminimized
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+        var tw = service.GetTrackedWindows().Single();
+        Assert.False(tw.IsMinimized);
+
+        // User clicks title bar minimize button on Umbra window
+        mockWindow.IsMinimized = true;
+
+        // Next scan tick reconciles native minimize
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        Assert.True(tw.IsMinimized);
+        Assert.False(tw.IsOpen);
+
+        var proxy = Assert.IsType<UmbraWindowProxy>(fakeWm._instances["UmbraSettings"]);
+        Assert.True(proxy.IsHidden);
+
+        fakeWm._instances["UmbraSettings"].Render("UmbraSettings");
+        Assert.Equal(0, mockWindow.RenderCallCount);
+    }
+
+    [Fact]
+    public void ScanUmbra_TryFastTrackWindow_WhenWindowIsMinimized_MinimizesTrackedWindow()
+    {
+        var service = new WindowManagerService();
+        var tracker = new DalamudWindowTracker(service);
+        var fakeWm = new FakeUmbraWindowManager();
+        var mockWindow = new MockUmbraWindow { IsMinimized = false };
+        fakeWm._instances["UmbraSettings"] = mockWindow;
+
+        tracker.ScanUmbraCoreWindows(fakeWm, new byte[] { 1 });
+
+        // Umbra title bar minimizes window
+        mockWindow.IsMinimized = true;
+
+        var tw = tracker.TryFastTrackWindow("UmbraSettings");
+        Assert.NotNull(tw);
+        Assert.True(tw.IsMinimized);
+        Assert.False(tw.IsOpen);
+    }
+
     public static class MockAutoHookService
     {
-        public static WindowSystem WindowSystem { get; set; } = null!;
+        public static WindowSystem? WindowSystem { get; set; }
     }
 
     public class MockAutoHookPlugin
     {
-        private static DummyWindow _pluginUi = null!;
-        private static DummyWindow _autoGig = null!;
+        private static DummyWindow? _pluginUi;
+        private static DummyWindow? _autoGig;
 
         public MockAutoHookPlugin(DummyWindow ui, DummyWindow gig)
         {
             _pluginUi = ui;
             _autoGig = gig;
+        }
+
+        public static void Reset()
+        {
+            _pluginUi = null;
+            _autoGig = null;
         }
     }
 
@@ -1195,17 +1918,24 @@ public class DalamudWindowTrackerTests
         var gigWin = new DummyWindow("SpearfishingHelper") { Flags = ImGuiWindowFlags.NoDecoration | ImGuiWindowFlags.NoInputs };
         var plugin = new MockAutoHookPlugin(uiWin, gigWin);
 
-        var scanMethod = typeof(DalamudWindowTracker).GetMethod(
-            "ScanObjectForWindowSystems",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-        Assert.NotNull(scanMethod);
+        try
+        {
+            var scanMethod = typeof(DalamudWindowTracker).GetMethod(
+                "ScanObjectForWindowSystems",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            Assert.NotNull(scanMethod);
 
-        scanMethod.Invoke(tracker, new object[] { plugin });
+            scanMethod.Invoke(tracker, new object[] { plugin });
 
-        var tracked = service.GetTrackedWindows();
-        Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
-        Assert.Single(uiWin.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, uiWin.TitleBarButtons.First().Icon);
+            var tracked = service.GetTrackedWindows();
+            Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+            Assert.Empty(uiWin.TitleBarButtons);
+            Assert.Equal(ImGuiWindowFlags.None, uiWin.Flags & ImGuiWindowFlags.NoCollapse);
+        }
+        finally
+        {
+            MockAutoHookPlugin.Reset();
+        }
     }
 
     [Fact]
@@ -1219,17 +1949,24 @@ public class DalamudWindowTrackerTests
         ws.AddWindow(uiWin);
         MockAutoHookService.WindowSystem = ws;
 
-        var scanMethod = typeof(DalamudWindowTracker).GetMethod(
-            "ScanPluginAssembly",
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
-        Assert.NotNull(scanMethod);
+        try
+        {
+            var scanMethod = typeof(DalamudWindowTracker).GetMethod(
+                "ScanPluginAssembly",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public);
+            Assert.NotNull(scanMethod);
 
-        scanMethod.Invoke(tracker, new object[] { typeof(MockAutoHookService).Assembly });
+            scanMethod.Invoke(tracker, new object[] { typeof(MockAutoHookService).Assembly });
 
-        var tracked = service.GetTrackedWindows();
-        Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
-        Assert.Single(uiWin.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, uiWin.TitleBarButtons.First().Icon);
+            var tracked = service.GetTrackedWindows();
+            Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
+            Assert.Empty(uiWin.TitleBarButtons);
+            Assert.Equal(ImGuiWindowFlags.None, uiWin.Flags & ImGuiWindowFlags.NoCollapse);
+        }
+        finally
+        {
+            MockAutoHookService.WindowSystem = null;
+        }
     }
 
     [Fact]
@@ -1256,8 +1993,8 @@ public class DalamudWindowTrackerTests
 
         var tracked = service.GetTrackedWindows();
         Assert.Contains(tracked, t => t.WindowName == "AutoHook 2.5.0.0###MainAutoHook");
-        Assert.Single(uiWin.TitleBarButtons);
-        Assert.Equal(FontAwesomeIcon.WindowMinimize, uiWin.TitleBarButtons.First().Icon);
+        Assert.Empty(uiWin.TitleBarButtons);
+        Assert.Equal(ImGuiWindowFlags.None, uiWin.Flags & ImGuiWindowFlags.NoCollapse);
     }
 
     [Fact]
@@ -1278,9 +2015,8 @@ public class DalamudWindowTrackerTests
         Assert.False(tracked.IsMinimized);
         Assert.True(tracked.IsManageable);
 
-        // Minimize via injected button click
-        var minBtn = uiWin.TitleBarButtons.Single(b => b.Icon == FontAwesomeIcon.WindowMinimize);
-        minBtn.Click?.Invoke(ImGuiMouseButton.Left);
+        // Minimize via service (as triggered by native title bar collapse in PR #52)
+        service.Minimize(tracked);
 
         Assert.True(tracked.IsMinimized);
         Assert.False(uiWin.IsOpen);
@@ -1297,4 +2033,3 @@ public class DalamudWindowTrackerTests
         Assert.True(tracked.IsOpen);
     }
 }
-

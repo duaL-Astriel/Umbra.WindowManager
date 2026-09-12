@@ -1,6 +1,7 @@
 // Umbra.WindowManager/Services/WindowManager/ImGuiContextMonitor.cs
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using Dalamud.Bindings.ImGui;
 using Umbra.Common;
 
@@ -29,9 +30,24 @@ public class ImGuiContextMonitor
     {
         this.windowManager = windowManager;
         this.windowTracker = windowTracker;
+        if (this.windowTracker != null)
+        {
+            this.windowTracker.PluginReloaded += this.ClearUnmanagedCache;
+        }
+    }
+
+
+    /// <summary>
+    /// Clears the cache of unmanaged window names so newly opened or updated plugin windows are
+    /// immediately re-evaluated against known window systems without waiting for the periodic 60-frame cycle.
+    /// </summary>
+    public void ClearUnmanagedCache()
+    {
+        this.unmanagedWindowNames.Clear();
     }
 
     public static bool ValidateWindowDimensions(System.Numerics.Vector2 size) =>
+
         size.X > 0 && size.Y > 0;
 
     public static bool ValidateWindowContent(System.Numerics.Vector2 contentSize, int drawCmdCount) =>
@@ -87,6 +103,22 @@ public class ImGuiContextMonitor
                mousePos.Y >= windowPos.Y && mousePos.Y <= windowPos.Y + titleBarHeight;
     }
 
+    internal void PopulateTrackedMap()
+    {
+        this.trackedMap.Clear();
+        this.windowManager.GetTrackedWindows(this.trackedBuffer);
+        for (var i = 0; i < this.trackedBuffer.Count; i++)
+        {
+            var t = this.trackedBuffer[i];
+            this.trackedMap[t.WindowName] = t;
+            if (!string.IsNullOrEmpty(t.Id))
+                this.trackedMap[t.Id] = t;
+        }
+    }
+
+    internal bool TryGetTrackedWindow(string name, [NotNullWhen(true)] out TrackedWindow? tracked) =>
+        this.trackedMap.TryGetValue(name, out tracked);
+
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
     {
@@ -99,14 +131,8 @@ public class ImGuiContextMonitor
         }
 
         this.seenWindows.Clear();
-        this.trackedMap.Clear();
-        this.windowManager.GetTrackedWindows(this.trackedBuffer);
+        this.PopulateTrackedMap();
         var rawEnabled = this.windowManager.RawTrackingEnabled;
-        for (var i = 0; i < this.trackedBuffer.Count; i++)
-        {
-            var t = this.trackedBuffer[i];
-            this.trackedMap[t.WindowName] = t;
-        }
 
         if (!rawEnabled)
         {
@@ -169,6 +195,7 @@ public class ImGuiContextMonitor
             }
 
             this.seenWindows.Add(name);
+            this.seenWindows.Add(tracked.WindowName);
 
             // Validate window presence: dimensions, content, and visibility
             var hasValidSize = ValidateWindowDimensions(win.Size);
@@ -249,20 +276,31 @@ public class ImGuiContextMonitor
             // the DockNode pointer reads as null here, so we rely on DockId + DockNodeIsVisible (#25).
             var isDocked = IsWindowDocked(win.DockId, win.DockNodeIsVisible);
 
-            // Continuous injection check: keep the minimize button in sync with dock state. The shared
-            // InjectMinimizeButton routine suppresses the button whenever DockGroupKey is set (populated
-            // below once full node membership is known), so dock-group tabs -- where Dalamud draws the
-            // button inside the client area, colliding with plugin controls (issue #25) -- lose it, while
-            // floating/standalone windows keep it re-injected in case a plugin cleared buttons.
+            // Ensure the window's original collapse/minimize button is enabled and any legacy injected button is removed
             if (tracked.TryGetWindow(out var dalamudWindow))
             {
-                DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
+                if (dalamudWindow is UmbraWindowAdapter uwa)
+                {
+                    uwa.HookTitleBarMinimize(this.windowManager, tracked);
+                    if (uwa.UnderlyingWindow.IsMinimized && !tracked.IsMinimized)
+                    {
+                        this.windowManager.Minimize(tracked);
+                    }
+                }
+                else
+                {
+                    DalamudWindowTracker.InjectMinimizeButton(dalamudWindow, tracked, this.windowManager);
+                }
             }
 
-            // 1. Native collapse guard: if collapsed natively, cancel it and fully minimize
+            // 1. Native collapse guard: if the original button is clicked to collapse, cancel the collapse and minimize
             if (win.Collapsed)
             {
                 win.Collapsed = false;
+                if (tracked.TryGetWindow(out var w) && w.Collapsed == true)
+                {
+                    w.Collapsed = false;
+                }
                 this.windowManager.Minimize(tracked);
                 continue;
             }
@@ -277,6 +315,11 @@ public class ImGuiContextMonitor
                 if (mousePos.X >= win.Pos.X && mousePos.X <= win.Pos.X + win.Size.X &&
                     mousePos.Y >= win.Pos.Y && mousePos.Y <= win.Pos.Y + titleBarHeight)
                 {
+                    win.Collapsed = false;
+                    if (tracked.TryGetWindow(out var w) && w.Collapsed == true)
+                    {
+                        w.Collapsed = false;
+                    }
                     this.windowManager.Minimize(tracked);
                     continue;
                 }
@@ -333,10 +376,15 @@ public class ImGuiContextMonitor
         }
 
         // For open non-minimized windows not observed in ctx.Windows, count missing frames
+        this.UpdateUnseenFrames();
+    }
+
+    internal void UpdateUnseenFrames()
+    {
         for (var i = 0; i < this.trackedBuffer.Count; i++)
         {
             var t = this.trackedBuffer[i];
-            if (this.seenWindows.Contains(t.WindowName))
+            if (this.seenWindows.Contains(t.WindowName) || (!string.IsNullOrEmpty(t.Id) && this.seenWindows.Contains(t.Id)))
                 continue;
 
             if (t is ImGuiTrackedWindow)
