@@ -48,17 +48,18 @@ public sealed class ImGuiTrackedWindow : TrackedWindow
     public override bool PassesDrawConditions => true;
 
     // "Open" for a raw window means it is currently drawing and not soft-hidden. The setter is a no-op:
-    // we cannot flip a foreign plugin's own visibility flag.
+    // we cannot flip a foreign plugin's own visibility flag; lifecycle is driven by observed frames (issue #38).
     public override bool IsOpen
     {
         get => !this.IsMinimized && this.HasConfirmedUi;
-        set { /* raw windows own their own draw loop; nothing to set */ }
+        set { /* raw windows own their own draw loop; lifecycle is driven by observed frames */ }
     }
 
     public override bool IsManageable
     {
         get
         {
+            if (this.UnseenFrames > 5) return false;
             if (!this.IsMinimized && !this.HasConfirmedUi) return false;
             if (this.ObservedSize.X <= 0 || this.ObservedSize.Y <= 0) return false;
             return this.HasTitleBar;

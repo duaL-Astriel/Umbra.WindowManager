@@ -50,6 +50,15 @@ public class ImGuiContextMonitor
         dockId != 0 && dockNodeVisible;
 
     /// <summary>
+    /// Evaluates whether an ImGui window is currently active/drawing in the context.
+    /// In Dear ImGui, a window is marked Active during Begin() and WasActive records whether it was
+    /// active in the previous frame. Inactive windows remain allocated in ctx.Windows indefinitely after
+    /// closing and must be ignored so they don't persist in tracking (issue #38).
+    /// </summary>
+    public static bool IsWindowActive(bool active, bool wasActive) =>
+        active || wasActive;
+
+    /// <summary>
     /// Decides whether a raw-ImGui window should minimize to the toolbar this frame from a title-bar
     /// affordance (issue #38). Raw windows have no <see cref="Dalamud.Interface.Windowing.IWindow"/> and so
     /// get no injected title-bar button, but the native collapse arrow and a title-bar double-click can
@@ -121,6 +130,9 @@ public class ImGuiContextMonitor
             var win = ctx.Windows[i];
             if (win.IsNull) continue;
 
+            if (!IsWindowActive(win.Active, win.WasActive))
+                continue;
+
             var name = win.Name != null ? System.Runtime.InteropServices.Marshal.PtrToStringUTF8((IntPtr)win.Name) : null;
             if (string.IsNullOrEmpty(name))
                 continue;
@@ -149,7 +161,12 @@ public class ImGuiContextMonitor
             }
 
             if (!rawEnabled && tracked is ImGuiTrackedWindow)
+            {
+                win.Hidden = false;
+                win.HiddenFramesCannotSkipItems = 0;
+                win.HiddenFramesForRenderOnly = 0;
                 continue;   // feature off: don't observe/bookkeep a raw entry — let it age out via the Step-5 loop and be pruned (~0.5s)
+            }
 
             this.seenWindows.Add(name);
 
@@ -209,10 +226,16 @@ public class ImGuiContextMonitor
                 {
                     case RawFrameActionKind.HideOffScreen:
                         ImGui.SetWindowPos(name, action.Position, ImGuiCond.Always);
+                        win.Hidden = true;
+                        win.HiddenFramesCannotSkipItems = 2;
+                        win.HiddenFramesForRenderOnly = 2;
                         break;
                     case RawFrameActionKind.Restore:
                         ImGui.SetWindowPos(name, action.Position, ImGuiCond.Always);
                         ImGui.SetWindowFocus(name);
+                        win.Hidden = false;
+                        win.HiddenFramesCannotSkipItems = 0;
+                        win.HiddenFramesForRenderOnly = 0;
                         break;
                     case RawFrameActionKind.Focus:
                         ImGui.SetWindowFocus(name);
@@ -319,6 +342,10 @@ public class ImGuiContextMonitor
             if (t is ImGuiTrackedWindow)
             {
                 t.UnseenFrames++;
+                if (t.UnseenFrames > 5)
+                {
+                    t.HasConfirmedUi = false;
+                }
                 continue;
             }
 

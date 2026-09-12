@@ -61,6 +61,35 @@ public class ImGuiTrackedWindowTests
     }
 
     [Fact]
+    public void IsManageable_RequiresUnseenFramesWithinGracePeriod()
+    {
+        var w = MakeDrawn();
+        w.UnseenFrames = 5;
+        Assert.True(w.IsManageable);
+
+        w.UnseenFrames = 6;
+        Assert.False(w.IsManageable);
+
+        // Also applies to minimized raw windows: once closed (unseen > 5), no longer manageable
+        w.UnseenFrames = 5;
+        w.IsMinimized = true;
+        Assert.True(w.IsManageable);
+
+        w.UnseenFrames = 6;
+        Assert.False(w.IsManageable);
+    }
+
+    [Fact]
+    public void IsOpen_SetterIsNoOp()
+    {
+        var w = MakeDrawn();
+        Assert.True(w.IsOpen);
+
+        w.IsOpen = false;
+        Assert.True(w.IsOpen); // no-op: foreign plugin owns draw loop
+    }
+
+    [Fact]
     public void IsFocused_ReflectsObservedFocus()
     {
         var w = MakeDrawn();

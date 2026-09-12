@@ -116,4 +116,17 @@ public class ImGuiContextMonitorValidationTests
 
         Assert.Equal(expected, result);
     }
+
+    [Theory]
+    // Active this frame (drawn before OnDraw) -> active.
+    [InlineData(true, true, true)]
+    [InlineData(true, false, true)]
+    // Active previous frame (drawn after OnDraw, or transitional frame) -> active.
+    [InlineData(false, true, true)]
+    // Inactive in both frames (window is closed or not submitted) -> inactive.
+    [InlineData(false, false, false)]
+    public void IsWindowActive_EvaluatesActiveAndWasActive(bool active, bool wasActive, bool expected)
+    {
+        Assert.Equal(expected, ImGuiContextMonitor.IsWindowActive(active, wasActive));
+    }
 }
