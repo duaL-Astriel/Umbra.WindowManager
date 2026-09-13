@@ -26,6 +26,34 @@ public static class ImGuiWindowClassifier
         ImGuiWindowFlags.NoInputs |
         ImGuiWindowFlags.NoMouseInputs;
 
+    /// <summary>
+    /// The allocation-free subset of <see cref="ShouldTrack"/>'s conditions -- everything decidable straight
+    /// off the ImGui window, without a clean title. Returning <c>false</c> guarantees <see cref="ShouldTrack"/>
+    /// would also return <c>false</c>, so the draw loop can reject the overwhelming majority of
+    /// <c>ctx.Windows</c> entries (child windows, popups, tooltips, <c>##</c>-prefixed internals) before paying
+    /// for <see cref="WindowInfoHelper.GetCleanTitle"/>, which splits and trims (issue #51).
+    /// </summary>
+    public static bool CouldTrack(ImGuiWindowFlags flags, Vector2 size, string name) =>
+        CouldTrack(flags, size, name.AsSpan());
+
+    /// <inheritdoc cref="CouldTrack(ImGuiWindowFlags, Vector2, string)"/>
+    public static bool CouldTrack(ImGuiWindowFlags flags, Vector2 size, ReadOnlySpan<char> name)
+    {
+        if (!ImGuiContextMonitor.ValidateWindowDimensions(size))
+            return false;
+
+        if ((flags & ExcludedFlags) != 0)
+            return false;
+
+        foreach (var prefix in InternalNamePrefixes)
+        {
+            if (name.StartsWith(prefix, StringComparison.Ordinal))
+                return false;
+        }
+
+        return true;
+    }
+
     public static bool ShouldTrack(ImGuiWindowFlags flags, Vector2 size, string name, string cleanTitle, bool hasContent)
     {
         if (!ImGuiContextMonitor.ValidateWindowDimensions(size))

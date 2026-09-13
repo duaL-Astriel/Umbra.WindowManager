@@ -1,4 +1,5 @@
 using System;
+using System.Threading;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Dalamud.Interface.Windowing;
@@ -98,6 +99,17 @@ public class WindowManagerService
         }
     }
 
+    private int windowRegistrationGeneration;
+
+    /// <summary>
+    /// Bumped every time a window is registered under a name that was not already tracked (or is re-registered
+    /// with a different <see cref="IWindow"/> instance). Observers use it to tell "the set of manageable windows
+    /// actually changed" from "nothing happened", so caches keyed on manageability can be invalidated on the
+    /// change itself instead of being flushed on a timer (issue #51). Additions only: dropping a window can
+    /// never turn a previously unmanageable window name into a manageable one.
+    /// </summary>
+    public int WindowRegistrationGeneration => Volatile.Read(ref this.windowRegistrationGeneration);
+
     public TrackedWindow RegisterWindow(IWindow window)
     {
         var now = DateTime.UtcNow;
@@ -109,11 +121,19 @@ public class WindowManagerService
 
         return this.windows.AddOrUpdate(
             window.WindowName,
-            _ => new TrackedWindow(window),
+            _ =>
+            {
+                Interlocked.Increment(ref this.windowRegistrationGeneration);
+                return new TrackedWindow(window);
+            },
             (_, existing) =>
-                existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window)
-                    ? existing
-                    : new TrackedWindow(window));
+            {
+                if (existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window))
+                    return existing;
+
+                Interlocked.Increment(ref this.windowRegistrationGeneration);
+                return new TrackedWindow(window);
+            });
     }
 
     /// <summary>
