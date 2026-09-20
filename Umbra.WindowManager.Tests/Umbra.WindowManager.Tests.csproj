@@ -23,6 +23,10 @@
     </ItemGroup>
 
     <ItemGroup>
+        <None Include="$(DalamudLibPath)cimgui.dll" CopyToOutputDirectory="PreserveNewest" Visible="false" />
+    </ItemGroup>
+
+    <ItemGroup>
         <Reference Include="Dalamud">
             <HintPath>$(DalamudLibPath)Dalamud.dll</HintPath>
             <Private>true</Private>
@@ -41,6 +45,22 @@
         </Reference>
         <Reference Include="Una.Drawing">
             <HintPath>$(UmbraLibPath)Una.Drawing.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="FFXIVClientStructs">
+            <HintPath>$(DalamudLibPath)FFXIVClientStructs.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="InteropGenerator.Runtime">
+            <HintPath>$(DalamudLibPath)InteropGenerator.Runtime.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="Lumina">
+            <HintPath>$(DalamudLibPath)Lumina.dll</HintPath>
+            <Private>true</Private>
+        </Reference>
+        <Reference Include="Lumina.Excel">
+            <HintPath>$(DalamudLibPath)Lumina.Excel.dll</HintPath>
             <Private>true</Private>
         </Reference>
     </ItemGroup>

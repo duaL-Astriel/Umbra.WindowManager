@@ -5,6 +5,7 @@ using System.Reflection;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Interface;
 using Dalamud.Interface.Windowing;
+using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using Umbra.Common;
 using Umbra.Widgets;
 using Umbra.WindowManager.Services.WindowManager;
@@ -26,10 +27,10 @@ public class WindowManagerWidgetTests
         public override void Draw() { }
     }
 
-    private static WindowManagerWidget CreateWidget(WindowManagerService service)
+    private static WindowManagerWidget CreateWidget(WindowManagerService service, Dictionary<string, object>? configValues = null)
     {
         var info = new WidgetInfo("WindowManagerWidget", "Window Manager", "Window manager widget");
-        return new WindowManagerWidget(info, null, null, service);
+        return new WindowManagerWidget(info, null, configValues, service);
     }
 
     [Fact]
@@ -480,12 +481,13 @@ public class WindowManagerWidgetTests
         var vars = (method.Invoke(widget, null) as IEnumerable<IWidgetConfigVariable>)?.ToList();
 
         Assert.NotNull(vars);
-        Assert.Equal(6, vars.Count);
+        Assert.Equal(7, vars.Count);
         Assert.Contains(vars, v => v.Id == "WindowManager.DisplayMode");
         Assert.Contains(vars, v => v.Id == "WindowManager.MaxTitleWidth");
         Assert.Contains(vars, v => v.Id == "WindowManager.GroupDockedTabs");
         Assert.Contains(vars, v => v.Id == "WindowManager.Blacklist");
         Assert.Contains(vars, v => v.Id == "WindowManager.TrackRawImGuiWindows");
+        Assert.Contains(vars, v => v.Id == "WindowManager.TrackGameWindows");
         var decorateVar = vars.OfType<BooleanWidgetConfigVariable>().FirstOrDefault(v => v.Id == "WindowManager.Decorate");
         Assert.NotNull(decorateVar);
         Assert.Equal("General", decorateVar.Category);
@@ -1332,6 +1334,127 @@ public class WindowManagerWidgetTests
             isMinimized: false, isFocused: false, dockedMembers: null, isRawImGui: false);
         Assert.DoesNotContain("Best-effort", normal);
     }
+
+    [Fact]
+    public void Constructor_InitializesTrackGameWindowsTrueByDefault()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service);
+
+        Assert.True(widget.TrackGameWindows);
+    }
+
+    [Fact]
+    public void Constructor_WithTrackGameWindowsFalse_SetsTrackGameWindowsFalse()
+    {
+        var service = new WindowManagerService();
+        var widget = CreateWidget(service, new Dictionary<string, object>
+        {
+            ["WindowManager.TrackGameWindows"] = false
+        });
+
+        Assert.False(widget.TrackGameWindows);
+    }
+
+    [Fact]
+    public void UpdateButtons_WhenTrackGameWindowsIsTrue_IncludesGameWindows()
+    {
+        var service = new WindowManagerService();
+        var entry = new MainCommandEntry("Character", AgentId.Status, 2u, 1u, "Character");
+        var gameWin = new GameWindowAdapter("Character", entry)
+        {
+            CheckIsOpen = () => true
+        };
+        service.RegisterWindow(gameWin);
+
+        var widget = CreateWidget(service);
+        widget.TrackGameWindows = true;
+        widget.UpdateButtons();
+
+        Assert.True(widget.WindowNodes.ContainsKey("Character###Game_Character"));
+    }
+
+    [Fact]
+    public void UpdateButtons_WhenTrackGameWindowsIsFalse_FiltersOutGameWindows()
+    {
+        var service = new WindowManagerService();
+        var entry = new MainCommandEntry("Character", AgentId.Status, 2u, 1u, "Character");
+        var gameWin = new GameWindowAdapter("Character", entry)
+        {
+            CheckIsOpen = () => true
+        };
+        var normalWin = new DummyWindow("PluginWin");
+        service.RegisterWindow(gameWin);
+        service.RegisterWindow(normalWin);
+
+        var widget = CreateWidget(service);
+        widget.TrackGameWindows = false;
+        widget.UpdateButtons();
+
+        Assert.False(widget.WindowNodes.ContainsKey("Character###Game_Character"));
+        Assert.True(widget.WindowNodes.ContainsKey("PluginWin"));
+    }
+
+    [Theory]
+    [InlineData("Character")]
+    [InlineData("Character###Game_Character")]
+    [InlineData("Game:Character")]
+    [InlineData("Game_Character")]
+    [InlineData("FFXIV")]
+    public void UpdateButtons_BlacklistFiltering_ExcludesGameWindow(string blacklistedTerm)
+    {
+        var service = new WindowManagerService();
+        var entry = new MainCommandEntry("Character", AgentId.Status, 2u, 1u, "Character");
+        var gameWin = new GameWindowAdapter("Character", entry)
+        {
+            CheckIsOpen = () => true
+        };
+        var tw = service.RegisterWindow(gameWin);
+        tw.PluginInternalName = "FFXIV";
+
+        var widget = CreateWidget(service);
+        widget.TrackGameWindows = true;
+        widget.Blacklist = blacklistedTerm;
+        widget.UpdateButtons();
+
+        Assert.False(widget.WindowNodes.ContainsKey("Character###Game_Character"));
+    }
+
+    [Fact]
+    public void UpdateButtons_MultipleRelatedGameWindows_DeduplicatesToSingleButton()
+    {
+        var service = new WindowManagerService();
+        var friendEntry = new MainCommandEntry("FriendList", AgentId.Friendlist, 13u, 18u, "Friend List");
+        var partyEntry = new MainCommandEntry("PartyMemberList", AgentId.PartyMember, 12u, 17u, "Party Members");
+
+        var win1 = new GameWindowAdapter("FriendList", friendEntry)
+        {
+            CheckIsOpen = () => true,
+            CheckIsFocused = () => true
+        };
+        var win2 = new GameWindowAdapter("PartyMemberList", partyEntry)
+        {
+            CheckIsOpen = () => true,
+            CheckIsFocused = () => false
+        };
+
+        var tw1 = service.RegisterWindow(win1);
+        tw1.PluginInternalName = "FFXIV";
+        tw1.Namespace = "Game";
+
+        var tw2 = service.RegisterWindow(win2);
+        tw2.PluginInternalName = "FFXIV";
+        tw2.Namespace = "Game";
+
+        var widget = CreateWidget(service);
+        widget.TrackGameWindows = true;
+        widget.UpdateButtons();
+
+        // Exactly one button should be rendered for the two related tabs
+        Assert.Single(widget.WindowNodes);
+        Assert.True(widget.WindowNodes.ContainsKey(win1.WindowName));
+    }
 }
+
 
 

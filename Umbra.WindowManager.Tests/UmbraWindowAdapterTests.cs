@@ -483,3 +483,9 @@ public class UmbraWindowAdapterTests
         Assert.True(proxy.IsHidden);
     }
 }
+
+
+
+
+
+
