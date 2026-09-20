@@ -376,6 +376,23 @@ public class GameWindowTracker : IDisposable
                 }
 
                 this.TrackOrUpdateAddon(entry, (nint)unit, isNativeShow: isNativeShow);
+
+                if (!isCurrentlyMinimized)
+                {
+                    GameWindowAdapter.RestoreChromeVisibility(unit, entry.AddonName);
+                    if (adapter != null)
+                    {
+                        for (var j = 0; j < count; j++)
+                        {
+                            var other = entries[j].Value;
+                            if (other == null || other == unit) continue;
+                            if (adapter.IsRelatedUnit(unit, other, entry.AddonName))
+                            {
+                                GameWindowAdapter.RestoreChromeVisibility(other, other->NameString);
+                            }
+                        }
+                    }
+                }
             }
 
             // Clean up adapters for windows that are no longer loaded in AllLoadedUnitsList

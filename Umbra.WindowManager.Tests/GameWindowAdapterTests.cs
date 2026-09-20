@@ -302,4 +302,66 @@ public class GameWindowAdapterTests
         adapter.OnNativeShown();
         Assert.False(adapter.IsLocallyMinimized);
     }
+
+    [Theory]
+    [InlineData("FriendList", true)]
+    [InlineData("PartyMemberList", true)]
+    [InlineData("BlackList", true)]
+    [InlineData("Search", true)]
+    [InlineData("PlayerSearch", true)]
+    [InlineData("GSInfoGeneral", true)]
+    [InlineData("GSInfoCardList", true)]
+    [InlineData("CharacterClass", true)]
+    [InlineData("CharacterStatus", true)]
+    [InlineData("InventoryGrid", true)]
+    [InlineData("InventoryLarge", true)]
+    [InlineData("Social", false)]
+    [InlineData("Character", false)]
+    [InlineData("Inventory", false)]
+    [InlineData("GoldSaucer", false)]
+    [InlineData("Journal", false)]
+    [InlineData("LookingForGroup", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsChildTabAddonName_IdentifiesChildTabsCorrectly(string? addonName, bool expected)
+    {
+        var result = GameWindowAdapter.IsChildTabAddonName(addonName);
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public unsafe void IsChildTabUnit_WhenHostIdNonZero_ReturnsTrue()
+    {
+        var unit = new FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase
+        {
+            HostId = 130
+        };
+
+        Assert.True(GameWindowAdapter.IsChildTabUnit(&unit, "AnyWindow"));
+    }
+
+    [Fact]
+    public unsafe void IsChildTabUnit_WhenHostIdZeroAndStandalone_ReturnsFalse()
+    {
+        var unit = new FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase
+        {
+            HostId = 0
+        };
+
+        Assert.False(GameWindowAdapter.IsChildTabUnit(&unit, "Social"));
+        Assert.False(GameWindowAdapter.IsChildTabUnit(&unit, "Character"));
+    }
+
+    [Fact]
+    public unsafe void IsChildTabUnit_WhenHostIdZeroAndChildTabName_ReturnsTrue()
+    {
+        var unit = new FFXIVClientStructs.FFXIV.Component.GUI.AtkUnitBase
+        {
+            HostId = 0
+        };
+
+        Assert.True(GameWindowAdapter.IsChildTabUnit(&unit, "PartyMemberList"));
+        Assert.True(GameWindowAdapter.IsChildTabUnit(&unit, "FriendList"));
+    }
 }
+

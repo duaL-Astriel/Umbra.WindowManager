@@ -50,6 +50,122 @@ public class GameWindowAdapter : IWindow
         }
     }
 
+    /// <summary>
+    /// Determines whether an addon is an embedded child tab inside a parent container
+    /// (e.g. FriendList/PartyMemberList inside Social, GSInfo inside GoldSaucer).
+    /// Child tabs must NOT have their own WindowNode visible because the parent container provides the window chrome.
+    /// </summary>
+    internal static unsafe bool IsChildTabUnit(AtkUnitBase* unit, string? addonName = null)
+    {
+        if (unit == null) return false;
+
+        // 1. If FFXIV designated a HostId, it is hosted inside another addon container
+        if (unit->HostId != 0) return true;
+
+        // 2. Check known child tab names
+        var name = !string.IsNullOrEmpty(addonName) ? addonName : unit->NameString;
+        return IsChildTabAddonName(name);
+    }
+
+    public static bool IsChildTabAddonName(string? addonName)
+    {
+        if (string.IsNullOrWhiteSpace(addonName))
+            return false;
+
+        // Social window child tabs (FriendList, PartyMemberList, BlackList, Search, PlayerSearch)
+        if (addonName.Equals("FriendList", StringComparison.OrdinalIgnoreCase) ||
+            addonName.Equals("PartyMemberList", StringComparison.OrdinalIgnoreCase) ||
+            addonName.Equals("BlackList", StringComparison.OrdinalIgnoreCase) ||
+            addonName.Equals("Search", StringComparison.OrdinalIgnoreCase) ||
+            addonName.Equals("PlayerSearch", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Gold Saucer child tabs
+        if (addonName.StartsWith("GSInfo", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Character sub-tabs (CharacterClass, CharacterStatus, CharacterRepute, GearSetList, etc.)
+        if (addonName.StartsWith("Character", StringComparison.OrdinalIgnoreCase) &&
+            !addonName.Equals("Character", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Inventory sub-grids
+        if (addonName.StartsWith("Inventory", StringComparison.OrdinalIgnoreCase) &&
+            !addonName.Equals("Inventory", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Restores proper WindowNode visibility: child tabs have WindowNode suppressed (false)
+    /// so their empty chrome does not draw over the parent container's close button and tabs,
+    /// while parent containers and standalone windows have WindowNode visible (true).
+    /// </summary>
+    internal static unsafe void RestoreChromeVisibility(AtkUnitBase* unit, string? addonName = null)
+    {
+        if (unit == null || unit->WindowNode == null) return;
+
+        try
+        {
+            var win = (AtkResNode*)unit->WindowNode;
+            var isCurrentlyVisible = (win->NodeFlags & NodeFlags.Visible) != 0;
+            var shouldBeVisible = !IsChildTabUnit(unit, addonName);
+
+            if (isCurrentlyVisible != shouldBeVisible)
+            {
+                unit->WindowNode->ToggleVisibility(shouldBeVisible);
+                DiagLog($"[ChromeVisibility] Fixed WindowNode visibility for {unit->NameString} from {isCurrentlyVisible} to {shouldBeVisible}");
+            }
+        }
+        catch (Exception ex)
+        {
+            DiagLog($"[ChromeVisibility] Error fixing WindowNode: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Diagnostic: logs the visibility flag and alpha of a unit's chrome nodes (RootNode, WindowNode)
+    /// so a minimize-vs-restore comparison shows exactly which node is left hidden. Only reads pointers
+    /// the surrounding code already dereferences, so it adds no crash risk.
+    /// </summary>
+    internal static unsafe void DiagDumpChrome(string phase, string label, AtkUnitBase* unit)
+    {
+        try
+        {
+            if (unit == null)
+            {
+                DiagLog($"[Chrome:{phase}] {label} unit=null");
+                return;
+            }
+
+            var root = unit->RootNode;
+            var rootInfo = root != null
+                ? $"root(vis={(root->NodeFlags & NodeFlags.Visible) != 0} a={root->Color.A})"
+                : "root=null";
+
+            var win = (AtkResNode*)unit->WindowNode;
+            var winInfo = win != null
+                ? $"window(vis={(win->NodeFlags & NodeFlags.Visible) != 0} a={win->Color.A})"
+                : "window=null";
+
+            DiagLog($"[Chrome:{phase}] {label} unitVis={unit->IsVisible} unitAlpha={unit->Alpha} {rootInfo} {winInfo}");
+        }
+        catch (Exception ex)
+        {
+            DiagLog($"[Chrome:{phase}] {label} ERROR {ex.Message}");
+        }
+    }
+
+
     public string AddonName { get; }
     public MainCommandEntry Entry { get; }
     public string? Title { get; }
@@ -120,10 +236,7 @@ public class GameWindowAdapter : IWindow
                         {
                             unit->RootNode->ToggleVisibility(true);
                         }
-                        if (unit->WindowNode != null)
-                        {
-                            unit->WindowNode->ToggleVisibility(true);
-                        }
+                        RestoreChromeVisibility(unit, this.AddonName);
                     }
                 }
 
@@ -146,10 +259,7 @@ public class GameWindowAdapter : IWindow
                                 {
                                     child->RootNode->ToggleVisibility(true);
                                 }
-                                if (child->WindowNode != null)
-                                {
-                                    child->WindowNode->ToggleVisibility(true);
-                                }
+                                RestoreChromeVisibility(child, child->NameString);
                             }
                         }
                         catch (Exception ex)
@@ -382,6 +492,7 @@ public class GameWindowAdapter : IWindow
             if (unit == null) return;
 
             DiagLog($"[MinimizeNative] START: Addon={this.AddonName} addr=0x{this.AddonAddress:X} unitName={unit->NameString} pos=({unit->X}, {unit->Y}) alpha={unit->Alpha} visible={unit->IsVisible} id={unit->Id} parentId={unit->ParentId} hostId={unit->HostId}");
+            DiagDumpChrome("min-before", $"primary:{unit->NameString}", unit);
 
             if (!this.hasSavedPosition && unit->X > -5000 && unit->Y > -5000)
             {
@@ -474,6 +585,7 @@ public class GameWindowAdapter : IWindow
                         }
                     }
 
+                    DiagDumpChrome("min-before", $"child:{child->NameString}", child);
                     child->IsVisible = false;
                     child->SetAlpha(0);
                     child->X = OffscreenCoord;
@@ -530,10 +642,8 @@ public class GameWindowAdapter : IWindow
                             {
                                 child->RootNode->ToggleVisibility(true);
                             }
-                            if (child->WindowNode != null)
-                            {
-                                child->WindowNode->ToggleVisibility(true);
-                            }
+                            RestoreChromeVisibility(child, child->NameString);
+                            DiagDumpChrome("restore-after", $"child:{child->NameString}", child);
                         }
                         else
                         {
@@ -559,11 +669,9 @@ public class GameWindowAdapter : IWindow
             {
                 unit->RootNode->ToggleVisibility(true);
             }
-            if (unit->WindowNode != null)
-            {
-                unit->WindowNode->ToggleVisibility(true);
-            }
+            RestoreChromeVisibility(unit, this.AddonName);
 
+            DiagDumpChrome("restore-after", $"primary:{unit->NameString}", unit);
             unit->Focus();
             DiagLog($"[RestoreNative] END: Addon={this.AddonName}");
         }
@@ -590,7 +698,7 @@ public class GameWindowAdapter : IWindow
                     unit->SetAlpha(this.savedAlpha > 0 ? this.savedAlpha : (byte)255);
                     unit->IsVisible = true;
                     if (unit->RootNode != null) unit->RootNode->ToggleVisibility(true);
-                    if (unit->WindowNode != null) unit->WindowNode->ToggleVisibility(true);
+                    RestoreChromeVisibility(unit, this.AddonName);
                     this.hasSavedPosition = false;
                 }
 
@@ -607,7 +715,7 @@ public class GameWindowAdapter : IWindow
                             child->SetAlpha(childState.SavedAlpha > 0 ? childState.SavedAlpha : (byte)255);
                             child->IsVisible = true;
                             if (child->RootNode != null) child->RootNode->ToggleVisibility(true);
-                            if (child->WindowNode != null) child->WindowNode->ToggleVisibility(true);
+                            RestoreChromeVisibility(child, child->NameString);
                         }
                         catch
                         {
