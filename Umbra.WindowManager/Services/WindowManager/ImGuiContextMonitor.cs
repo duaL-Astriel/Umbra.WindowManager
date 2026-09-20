@@ -245,11 +245,17 @@ public class ImGuiContextMonitor
             var win = ctx.Windows[i];
             if (win.IsNull) continue;
 
+            if (win.IsFallbackWindow)
+                continue;
+
             if (!IsWindowActive(win.Active, win.WasActive))
                 continue;
 
             var nameSpan = this.DecodeWindowName(win.Name);
             if (nameSpan.IsEmpty)
+                continue;
+
+            if (nameSpan.StartsWith("Debug##", StringComparison.Ordinal) || nameSpan.StartsWith("##", StringComparison.Ordinal))
                 continue;
 
             string name;
@@ -501,6 +507,19 @@ public class ImGuiContextMonitor
 
         // For open non-minimized windows not observed in ctx.Windows, count missing frames
         this.UpdateUnseenFrames();
+
+        // Reset WriteAccessed and NavWindow on the fallback/implicit window so monitor reads outside
+        // Begin/End never trick Dear ImGui into treating Debug##Default as active and rendering it.
+        var cur = ctx.CurrentWindow;
+        if (!cur.IsNull && cur.IsFallbackWindow)
+        {
+            cur.WriteAccessed = false;
+        }
+
+        if (!ctx.NavWindow.IsNull && ctx.NavWindow.IsFallbackWindow)
+        {
+            ctx.NavWindow = default;
+        }
     }
 
     internal void UpdateUnseenFrames()
@@ -509,6 +528,11 @@ public class ImGuiContextMonitor
         {
             var t = this.trackedBuffer[i];
             if (this.seenWindows.Contains(t.WindowName) || (!string.IsNullOrEmpty(t.Id) && this.seenWindows.Contains(t.Id)))
+                continue;
+
+            // Native FFXIV in-game windows are rendered by the Atk engine, not ImGui, so they will never
+            // appear in ctx.Windows. Exempt them from unseen-frames absence pruning to preserve HasConfirmedUi.
+            if (string.Equals(t.Namespace, "Game", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             if (t is ImGuiTrackedWindow)

@@ -123,6 +123,7 @@ public class WindowManagerWidget : ToolbarWidget
     private bool decorate = true;
     private string blacklist = "";
     private bool trackRawImGui;
+    private bool trackGameWindows = true;
     private string? lastFocusedWindowName;
     private long lastFocusedTick;
 
@@ -161,6 +162,8 @@ public class WindowManagerWidget : ToolbarWidget
                 this.blacklist = blds;
             if (configValues.TryGetValue("WindowManager.TrackRawImGuiWindows", out var tri) && tri is bool trib)
                 this.trackRawImGui = trib;
+            if (configValues.TryGetValue("WindowManager.TrackGameWindows", out var tgw) && tgw is bool tgwb)
+                this.trackGameWindows = tgwb;
         }
 
         this.rootNode = new Node
@@ -277,6 +280,20 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
+    [ConfigVariable("WindowManager.TrackGameWindows", "General", "Window Manager")]
+    public bool TrackGameWindows
+    {
+        get => this.HasConfigVariable("WindowManager.TrackGameWindows")
+            ? this.GetConfigValue<bool>("WindowManager.TrackGameWindows")
+            : this.trackGameWindows;
+        set
+        {
+            this.trackGameWindows = value;
+            if (this.HasConfigVariable("WindowManager.TrackGameWindows"))
+                this.SetConfigValue("WindowManager.TrackGameWindows", value);
+        }
+    }
+
     protected override void Initialize()
     {
     }
@@ -358,6 +375,16 @@ public class WindowManagerWidget : ToolbarWidget
             {
                 Category = "General",
                 Group = "Window Manager"
+            },
+            new BooleanWidgetConfigVariable(
+                "WindowManager.TrackGameWindows",
+                "Track In-Game Windows",
+                "Track and display native FFXIV in-game windows in the toolbar.",
+                true
+            )
+            {
+                Category = "General",
+                Group = "Window Manager"
             }
         ];
     }
@@ -378,12 +405,28 @@ public class WindowManagerWidget : ToolbarWidget
 
         if (!string.IsNullOrWhiteSpace(window.WindowName) && blacklist.Contains(window.WindowName))
             return true;
-        if (!string.IsNullOrWhiteSpace(window.CleanTitle) && blacklist.Contains(window.CleanTitle))
-            return true;
+        if (!string.IsNullOrWhiteSpace(window.CleanTitle))
+        {
+            if (blacklist.Contains(window.CleanTitle))
+                return true;
+            if (window.CleanTitle.StartsWith("Game:", StringComparison.OrdinalIgnoreCase) &&
+                blacklist.Contains(window.CleanTitle[5..]))
+                return true;
+            if (string.Equals(window.Namespace, "Game", StringComparison.OrdinalIgnoreCase) &&
+                blacklist.Contains($"Game:{window.CleanTitle}"))
+                return true;
+        }
         if (!string.IsNullOrWhiteSpace(window.Id) && blacklist.Contains(window.Id))
             return true;
         if (!string.IsNullOrWhiteSpace(window.PluginInternalName) && blacklist.Contains(window.PluginInternalName))
             return true;
+        if (window.TryGetWindow(out var w) && w is GameWindowAdapter gwa)
+        {
+            if (!string.IsNullOrWhiteSpace(gwa.AddonName) && blacklist.Contains(gwa.AddonName))
+                return true;
+            if (!string.IsNullOrWhiteSpace(gwa.Title) && blacklist.Contains(gwa.Title))
+                return true;
+        }
 
         return false;
     }
@@ -402,17 +445,61 @@ public class WindowManagerWidget : ToolbarWidget
         }
     }
 
+    internal static void DeduplicateGameWindows(List<TrackedWindow> buffer)
+    {
+        for (var i = buffer.Count - 1; i >= 0; i--)
+        {
+            var w1 = buffer[i];
+            if (!string.Equals(w1.Namespace, "Game", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!w1.TryGetWindow(out var win1) || win1 is not GameWindowAdapter ga1)
+                continue;
+
+            for (var j = 0; j < i; j++)
+            {
+                var w2 = buffer[j];
+                if (!string.Equals(w2.Namespace, "Game", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!w2.TryGetWindow(out var win2) || win2 is not GameWindowAdapter ga2)
+                    continue;
+
+                if (GameWindowAdapter.IsKnownTabOrChildAddon(ga1.AddonName, ga2.AddonName))
+                {
+                    // If one is focused, prefer the focused one; otherwise keep the first one
+                    if (w1.IsFocused && !w2.IsFocused)
+                    {
+                        buffer.RemoveAt(j);
+                    }
+                    else
+                    {
+                        buffer.RemoveAt(i);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     public void UpdateButtons()
     {
         this.rootNode.ToggleClass("decorated", this.Decorate);
         this.windowManager.RawTrackingEnabled = this.TrackRawImGui;
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
 
+        if (!this.TrackGameWindows)
+        {
+            this.windowsBuffer.RemoveAll(w => string.Equals(w.Namespace, "Game", StringComparison.OrdinalIgnoreCase));
+        }
+
         var blacklistSet = this.GetParsedBlacklist();
         if (blacklistSet.Count > 0)
         {
             this.windowsBuffer.RemoveAll(w => IsBlacklisted(w, blacklistSet));
         }
+
+        DeduplicateGameWindows(this.windowsBuffer);
 
 
         // Refresh the name -> current TrackedWindow map so click handlers always act on the live window

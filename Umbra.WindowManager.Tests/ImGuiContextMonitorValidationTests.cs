@@ -270,6 +270,33 @@ public class ImGuiContextMonitorValidationTests
 
         Assert.Equal(1, tw.UnseenFrames);
     }
+
+    [Fact]
+    public void UpdateUnseenFrames_WhenGameWindowUnobserved_ExemptFromPruningAndPreservesHasConfirmedUi()
+    {
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+        var entry = new MainCommandEntry("Character", FFXIVClientStructs.FFXIV.Client.UI.Agent.AgentId.Status, 2u, 1u, "Character");
+        var gameWindow = new GameWindowAdapter("Character", entry)
+        {
+            CheckIsOpen = () => true
+        };
+
+        var tw = service.RegisterWindow(gameWindow);
+        Assert.Equal("Game", tw.Namespace);
+        Assert.True(tw.HasConfirmedUi);
+
+        monitor.PopulateTrackedMap();
+
+        for (var i = 0; i < 10; i++)
+        {
+            monitor.UpdateUnseenFrames();
+        }
+
+        // Game window should be exempted: UnseenFrames remains 0, HasConfirmedUi remains true
+        Assert.Equal(0, tw.UnseenFrames);
+        Assert.True(tw.HasConfirmedUi);
+    }
 }
 
 
