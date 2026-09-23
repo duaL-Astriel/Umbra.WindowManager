@@ -29,6 +29,8 @@ public static class MainCommandRegistry
         Register("Character", AgentId.Status, 2, 1, "Character");
         Register("Inventory", AgentId.Inventory, 10, 2, "Inventory");
         RegisterAlias("InventoryGrid", "Inventory");
+        RegisterAlias("InventoryExpansion", "Inventory");
+        RegisterAlias("InventoryLarge", "Inventory");
         Register("ActionMenu", AgentId.ActionMenu, 3, 4, "Actions & Traits");
         Register("Journal", AgentId.QuestJournal, 4, 5, "Journal");
         Register("ContentsTimer", AgentId.ContentsTimer, 5, 47, "Timers");

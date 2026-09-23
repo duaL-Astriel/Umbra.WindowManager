@@ -298,4 +298,48 @@ public class GameWindowTrackerTests
         // Old tab state must not be left minimized/suppressed
         Assert.False(friendAdapter.IsLocallyMinimized);
     }
+
+    [Theory]
+    [InlineData("Inventory")]
+    [InlineData("InventoryExpansion")]
+    [InlineData("InventoryLarge")]
+    public void HandleAddonEvent_AllInventoryModes_RegistersInventoryWindow(string addonName)
+    {
+        var service = new WindowManagerService();
+        using var tracker = new GameWindowTracker(service);
+
+        var registered = tracker.HandleAddonEvent(addonName, address: 0x1234, isSetupOrShow: true);
+
+        Assert.True(registered);
+        var tracked = service.GetTrackedWindows();
+        Assert.Single(tracked);
+        Assert.Equal("Inventory", tracked.First().CleanTitle);
+        Assert.Equal("Game_Inventory", tracked.First().Id);
+    }
+
+    [Fact]
+    public void HandleAddonHide_ChildSubGridHiding_DoesNotUntrackOpenInventoryExpansion()
+    {
+        var service = new WindowManagerService();
+        using var tracker = new GameWindowTracker(service);
+
+        // Player opens Inventory in "Open All" (InventoryExpansion) mode
+        tracker.HandleAddonEvent("InventoryExpansion", address: 0x1234, isSetupOrShow: true);
+        Assert.Single(service.GetTrackedWindows());
+
+        // Inactive sub-grids (e.g., InventoryCrystalGrid, InventoryEventGrid0E, InventoryGrid) fire PostHide
+        // during initial open or when switching between Bags and Key Items/Crystals tabs
+        tracker.HandleAddonHide("InventoryCrystalGrid");
+        tracker.HandleAddonHide("InventoryEventGrid0E");
+        tracker.HandleAddonHide("InventoryGrid0E");
+        tracker.HandleAddonHide("InventoryGrid");
+
+        // Inventory must remain tracked!
+        Assert.Single(service.GetTrackedWindows());
+
+        // When the parent InventoryExpansion container itself hides, Inventory is untracked
+        var hidden = tracker.HandleAddonHide("InventoryExpansion");
+        Assert.True(hidden);
+        Assert.Empty(service.GetTrackedWindows());
+    }
 }
