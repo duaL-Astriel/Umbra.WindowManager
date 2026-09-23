@@ -11,6 +11,8 @@ public class MainCommandRegistryTests
     [InlineData("character", AgentId.Status, 2u, 1u, "Character")] // case-insensitive
     [InlineData("Inventory", AgentId.Inventory, 10u, 2u, "Inventory")]
     [InlineData("InventoryGrid", AgentId.Inventory, 10u, 2u, "Inventory")]
+    [InlineData("InventoryExpansion", AgentId.Inventory, 10u, 2u, "Inventory")]
+    [InlineData("InventoryLarge", AgentId.Inventory, 10u, 2u, "Inventory")]
     [InlineData("Journal", AgentId.QuestJournal, 4u, 5u, "Journal")]
     [InlineData("ContentsFinder", AgentId.ContentsFinder, 33u, 46u, "Duty Finder")]
     [InlineData("AreaMap", AgentId.Map, 16u, 7u, "Map")]

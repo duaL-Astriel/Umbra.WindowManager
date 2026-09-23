@@ -30,6 +30,7 @@ public class GameWindowAdapter : IWindow
         public short SavedX;
         public short SavedY;
         public byte SavedAlpha;
+        public bool SavedVisible;
     }
 
     private readonly List<SavedUnitState> savedChildUnits = [];
@@ -95,9 +96,10 @@ public class GameWindowAdapter : IWindow
             return true;
         }
 
-        // Inventory sub-grids
-        if (addonName.StartsWith("Inventory", StringComparison.OrdinalIgnoreCase) &&
-            !addonName.Equals("Inventory", StringComparison.OrdinalIgnoreCase))
+        // Inventory sub-grids (parent containers Inventory, InventoryLarge, InventoryExpansion, InventoryBuddy are NOT child tabs)
+        if (addonName.StartsWith("InventoryGrid", StringComparison.OrdinalIgnoreCase) ||
+            addonName.StartsWith("InventoryEventGrid", StringComparison.OrdinalIgnoreCase) ||
+            addonName.StartsWith("InventoryCrystalGrid", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -249,13 +251,13 @@ public class GameWindowAdapter : IWindow
                             var child = (AtkUnitBase*)childState.Address;
                             if (child != null)
                             {
-                                child->IsVisible = true;
+                                child->IsVisible = childState.SavedVisible;
                                 child->SetAlpha(childState.SavedAlpha > 0 ? childState.SavedAlpha : (byte)255);
                                 child->X = childState.SavedX;
                                 child->Y = childState.SavedY;
                                 child->SetPosition(childState.SavedX, childState.SavedY);
-                                DiagLog($"[OnNativeShown] restored child: {child->NameString} addr=0x{childState.Address:X} to ({childState.SavedX}, {childState.SavedY})");
-                                if (child->RootNode != null)
+                                DiagLog($"[OnNativeShown] restored child: {child->NameString} addr=0x{childState.Address:X} to ({childState.SavedX}, {childState.SavedY}) vis={childState.SavedVisible}");
+                                if (childState.SavedVisible && child->RootNode != null)
                                 {
                                     child->RootNode->ToggleVisibility(true);
                                 }
@@ -391,7 +393,10 @@ public class GameWindowAdapter : IWindow
             unsafe
             {
                 var unit = (AtkUnitBase*)this.AddonAddress;
-                return unit != null ? new Vector2(unit->GetScaledWidth(true), unit->GetScaledHeight(true)) : null;
+                if (unit == null) return null;
+                var width = unit->GetScaledWidth(true);
+                var height = unit->GetScaledHeight(true);
+                return width > 0 && height > 0 ? new Vector2(width, height) : null;
             }
         }
         set { }
@@ -575,9 +580,10 @@ public class GameWindowAdapter : IWindow
                                 Address = childAddr,
                                 SavedX = child->X,
                                 SavedY = child->Y,
-                                SavedAlpha = child->Alpha
+                                SavedAlpha = child->Alpha,
+                                SavedVisible = child->IsVisible
                             });
-                            DiagLog($"[MinimizeNative] saved child: {child->NameString} addr=0x{childAddr:X} pos=({child->X}, {child->Y}) alpha={child->Alpha}");
+                            DiagLog($"[MinimizeNative] saved child: {child->NameString} addr=0x{childAddr:X} pos=({child->X}, {child->Y}) alpha={child->Alpha} vis={child->IsVisible}");
                         }
                         else
                         {
@@ -632,13 +638,13 @@ public class GameWindowAdapter : IWindow
                         if (loadedAddrs.Contains(childState.Address))
                         {
                             var child = (AtkUnitBase*)childState.Address;
-                            child->IsVisible = true;
+                            child->IsVisible = childState.SavedVisible;
                             child->SetAlpha(childState.SavedAlpha > 0 ? childState.SavedAlpha : (byte)255);
                             child->X = childState.SavedX;
                             child->Y = childState.SavedY;
                             child->SetPosition(childState.SavedX, childState.SavedY);
-                            DiagLog($"[RestoreNative] restored child: {child->NameString} addr=0x{childState.Address:X} to ({childState.SavedX}, {childState.SavedY})");
-                            if (child->RootNode != null)
+                            DiagLog($"[RestoreNative] restored child: {child->NameString} addr=0x{childState.Address:X} to ({childState.SavedX}, {childState.SavedY}) vis={childState.SavedVisible}");
+                            if (childState.SavedVisible && child->RootNode != null)
                             {
                                 child->RootNode->ToggleVisibility(true);
                             }
@@ -713,8 +719,8 @@ public class GameWindowAdapter : IWindow
                             child->Y = childState.SavedY;
                             child->SetPosition(childState.SavedX, childState.SavedY);
                             child->SetAlpha(childState.SavedAlpha > 0 ? childState.SavedAlpha : (byte)255);
-                            child->IsVisible = true;
-                            if (child->RootNode != null) child->RootNode->ToggleVisibility(true);
+                            child->IsVisible = childState.SavedVisible;
+                            if (childState.SavedVisible && child->RootNode != null) child->RootNode->ToggleVisibility(true);
                             RestoreChromeVisibility(child, child->NameString);
                         }
                         catch
@@ -856,12 +862,16 @@ public class GameWindowAdapter : IWindow
 
         // Inventory & grids
         if (p.Equals("Inventory", StringComparison.OrdinalIgnoreCase) ||
+            p.Equals("InventoryExpansion", StringComparison.OrdinalIgnoreCase) ||
+            p.Equals("InventoryLarge", StringComparison.OrdinalIgnoreCase) ||
             p.Equals("InventoryGrid", StringComparison.OrdinalIgnoreCase))
         {
-            return c.StartsWith("InventoryGrid", StringComparison.OrdinalIgnoreCase) ||
+            return c.Equals("Inventory", StringComparison.OrdinalIgnoreCase) ||
+                   c.StartsWith("InventoryGrid", StringComparison.OrdinalIgnoreCase) ||
                    c.StartsWith("InventoryLarge", StringComparison.OrdinalIgnoreCase) ||
                    c.StartsWith("InventoryExpansion", StringComparison.OrdinalIgnoreCase) ||
                    c.StartsWith("InventoryEventGrid", StringComparison.OrdinalIgnoreCase) ||
+                   c.StartsWith("InventoryCrystalGrid", StringComparison.OrdinalIgnoreCase) ||
                    c.StartsWith("InventoryBuddy", StringComparison.OrdinalIgnoreCase);
         }
 

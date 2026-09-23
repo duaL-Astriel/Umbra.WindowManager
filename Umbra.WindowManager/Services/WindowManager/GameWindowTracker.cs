@@ -130,6 +130,12 @@ public class GameWindowTracker : IDisposable
     {
         if (MainCommandRegistry.TryGetByAddonName(args.AddonName, out var entry))
         {
+            if (GameWindowAdapter.IsChildTabAddonName(args.AddonName) &&
+                !GameWindowAdapter.IsChildTabAddonName(entry.AddonName))
+            {
+                return;
+            }
+
             if (this.knownAdapters.TryGetValue(entry.AddonName, out var adapter))
             {
                 adapter.AddonAddress = args.Addon.Address;
@@ -148,7 +154,16 @@ public class GameWindowTracker : IDisposable
         {
             if (isSetupOrShow)
             {
-                this.TrackOrUpdateAddon(entry, address, isNativeShow: true);
+                var effectiveAddress = address;
+                if (GameWindowAdapter.IsChildTabAddonName(addonName) &&
+                    !GameWindowAdapter.IsChildTabAddonName(entry.AddonName) &&
+                    this.knownAdapters.TryGetValue(entry.AddonName, out var existingAdapter) &&
+                    existingAdapter.AddonAddress != 0)
+                {
+                    effectiveAddress = 0;
+                }
+
+                this.TrackOrUpdateAddon(entry, effectiveAddress, isNativeShow: true);
                 return true;
             }
 
@@ -186,20 +201,27 @@ public class GameWindowTracker : IDisposable
         if (string.IsNullOrWhiteSpace(addonName))
             return false;
 
+        var isChildSubGrid = GameWindowAdapter.IsChildTabAddonName(addonName);
         var handled = false;
         if (MainCommandRegistry.TryGetByAddonName(addonName, out var entry))
         {
-            this.UntrackAddon(entry.AddonName);
-            handled = true;
+            if (!isChildSubGrid || GameWindowAdapter.IsChildTabAddonName(entry.AddonName))
+            {
+                this.UntrackAddon(entry.AddonName);
+                handled = true;
+            }
         }
 
-        // Also untrack any known adapter whose parent container or related family matches addonName
-        foreach (var (key, adapter) in this.knownAdapters)
+        // Also untrack any known adapter whose parent container matches addonName
+        if (!isChildSubGrid)
         {
-            if (GameWindowAdapter.IsKnownTabOrChildAddon(key, addonName))
+            foreach (var (key, adapter) in this.knownAdapters)
             {
-                this.UntrackAddon(key);
-                handled = true;
+                if (GameWindowAdapter.IsKnownTabOrChildAddon(key, addonName))
+                {
+                    this.UntrackAddon(key);
+                    handled = true;
+                }
             }
         }
 
@@ -211,33 +233,40 @@ public class GameWindowTracker : IDisposable
         if (string.IsNullOrWhiteSpace(addonName))
             return false;
 
+        var isChildSubGrid = GameWindowAdapter.IsChildTabAddonName(addonName);
         var handled = false;
         if (MainCommandRegistry.TryGetByAddonName(addonName, out var entry))
         {
-            if (this.knownAdapters.TryGetValue(entry.AddonName, out var adapter))
+            if (!isChildSubGrid || GameWindowAdapter.IsChildTabAddonName(entry.AddonName))
             {
-                // If the window was not minimized by WindowManager, native hide means it was hidden/closed in-game
-                var tw = this.windowManagerService.GetTrackedWindows().FirstOrDefault(w => w.TryGetWindow(out var win) && ReferenceEquals(win, adapter));
-                var isMinimized = adapter.IsLocallyMinimized || (tw != null && tw.IsMinimized);
-                if (!isMinimized)
+                if (this.knownAdapters.TryGetValue(entry.AddonName, out var adapter))
                 {
-                    this.UntrackAddon(entry.AddonName);
-                    handled = true;
+                    // If the window was not minimized by WindowManager, native hide means it was hidden/closed in-game
+                    var tw = this.windowManagerService.GetTrackedWindows().FirstOrDefault(w => w.TryGetWindow(out var win) && ReferenceEquals(win, adapter));
+                    var isMinimized = adapter.IsLocallyMinimized || (tw != null && tw.IsMinimized);
+                    if (!isMinimized)
+                    {
+                        this.UntrackAddon(entry.AddonName);
+                        handled = true;
+                    }
                 }
             }
         }
 
         // Also check if addonName is a parent container of any known adapter
-        foreach (var (key, adapter) in this.knownAdapters)
+        if (!isChildSubGrid)
         {
-            if (GameWindowAdapter.IsKnownTabOrChildAddon(key, addonName))
+            foreach (var (key, adapter) in this.knownAdapters)
             {
-                var tw = this.windowManagerService.GetTrackedWindows().FirstOrDefault(w => w.TryGetWindow(out var win) && ReferenceEquals(win, adapter));
-                var isMinimized = adapter.IsLocallyMinimized || (tw != null && tw.IsMinimized);
-                if (!isMinimized)
+                if (GameWindowAdapter.IsKnownTabOrChildAddon(key, addonName))
                 {
-                    this.UntrackAddon(key);
-                    handled = true;
+                    var tw = this.windowManagerService.GetTrackedWindows().FirstOrDefault(w => w.TryGetWindow(out var win) && ReferenceEquals(win, adapter));
+                    var isMinimized = adapter.IsLocallyMinimized || (tw != null && tw.IsMinimized);
+                    if (!isMinimized)
+                    {
+                        this.UntrackAddon(key);
+                        handled = true;
+                    }
                 }
             }
         }
@@ -334,10 +363,22 @@ public class GameWindowTracker : IDisposable
                 if (!MainCommandRegistry.TryGetByAddonName(name, out var entry))
                     continue;
 
+                if (GameWindowAdapter.IsChildTabAddonName(name) &&
+                    !GameWindowAdapter.IsChildTabAddonName(entry.AddonName))
+                {
+                    continue;
+                }
+
                 var isCurrentlyMinimized = this.knownAdapters.TryGetValue(entry.AddonName, out var adapter) && adapter.IsLocallyMinimized;
 
-                // Only track units that are visible, or already locally minimized by WindowManager
-                if (!unit->IsVisible && !isCurrentlyMinimized)
+                // Only track units that are visible, or the exact unit already locally minimized by WindowManager
+                if (!unit->IsVisible)
+                {
+                    if (!isCurrentlyMinimized || (adapter!.AddonAddress != 0 && adapter.AddonAddress != (nint)unit))
+                        continue;
+                }
+
+                if (activeAddonNames.Contains(entry.AddonName))
                     continue;
 
                 // Deduplicate within the current scan pass: if a related unit in the same window family
@@ -366,7 +407,7 @@ public class GameWindowTracker : IDisposable
                     {
                         var other = entries[j].Value;
                         if (other == null || other == unit) continue;
-                        if ((other->IsVisible || other->X > -5000) && adapter.IsRelatedUnit(unit, other, entry.AddonName))
+                        if (other->IsVisible && adapter.IsRelatedUnit(unit, other, entry.AddonName))
                         {
                             GameWindowAdapter.DiagLog($"[ScanActiveWindows] detected related unit {other->NameString} shown! Setting isNativeShow=true for {entry.AddonName}");
                             isNativeShow = true;
@@ -376,10 +417,11 @@ public class GameWindowTracker : IDisposable
                 }
 
                 this.TrackOrUpdateAddon(entry, (nint)unit, isNativeShow: isNativeShow);
+                this.knownAdapters.TryGetValue(entry.AddonName, out adapter);
 
                 if (!isCurrentlyMinimized)
                 {
-                    GameWindowAdapter.RestoreChromeVisibility(unit, entry.AddonName);
+                    GameWindowAdapter.RestoreChromeVisibility(unit, name);
                     if (adapter != null)
                     {
                         for (var j = 0; j < count; j++)
