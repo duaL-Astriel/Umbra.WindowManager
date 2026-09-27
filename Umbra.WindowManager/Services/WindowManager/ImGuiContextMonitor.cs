@@ -488,20 +488,21 @@ public class ImGuiContextMonitor
                 var activeName = this.dockActiveTab.GetValueOrDefault(dockId, members[0].WindowName);
                 this.windowManager.RegisterDockGroup(this.GetDockKey(dockId), activeName, members);
 
-                // Hide ImGui's dock-node window-menu (down-arrow) button on tab groups; like the other
-                // native controls it renders as a stray, obscured button over the tabs (issue #25).
-                this.SuppressDockNodeWindowMenuButton(dockId);
-
-                // Draw our own minimize button in the dock node's tab bar. Docked windows have no real
-                // title bar, so Dalamud's injected button lands in the client content area where plugin
-                // content draws over it (obscured + unclickable). Rendering into the tab bar -- which the
-                // plugin cannot draw over -- gives a visible, working group-minimize button (issue #25).
-                this.DrawDockGroupMinimizeButton(dockId, members);
+                // Unsuppress ImGui's native dock-node window-menu (down-arrow) button and repurpose it
+                // to minimize the dock group to the toolbar, consistent with normal windows (issue #59).
+                this.UnsuppressDockNodeWindowMenuButton(dockId);
+                this.HandleDockGroupMinimizeButton(dockId, members);
             }
-            else if (members.Count == 1 && members[0].DockGroupKey != null)
+            else if (members.Count == 1)
             {
-                this.windowManager.RemoveDockGroup(this.GetDockKey(dockId));
-                members[0].DockGroupKey = null;
+                if (members[0].DockGroupKey != null)
+                {
+                    this.windowManager.RemoveDockGroup(this.GetDockKey(dockId));
+                    members[0].DockGroupKey = null;
+                }
+
+                this.UnsuppressDockNodeWindowMenuButton(dockId);
+                this.HandleDockGroupMinimizeButton(dockId, members);
             }
         }
 
@@ -562,34 +563,47 @@ public class ImGuiContextMonitor
 
 
     /// <summary>
-    /// Returns <paramref name="flags"/> with the internal <c>NoWindowMenuButton</c> dock-node flag set.
-    /// This hides ImGui's dock-node window-menu button (the small down-arrow at the corner of a docked
-    /// tab bar), which -- like the other native controls -- is drawn on top of / beneath the docked tab
-    /// contents and reads as a stray, obscured button (issue #25). The flag lives in
-    /// <see cref="ImGuiDockNodeFlagsPrivate"/> (not the public enum), so it is applied via a cast.
+    /// Returns <paramref name="flags"/> with the internal <c>NoWindowMenuButton</c> dock-node flag cleared.
+    /// This ensures ImGui's native dock-node window-menu (down-arrow) button remains visible on docked
+    /// tab bars and can be repurposed to minimize the group (issue #59).
     /// </summary>
-    public static ImGuiDockNodeFlags WithWindowMenuButtonSuppressed(ImGuiDockNodeFlags flags) =>
-        flags | (ImGuiDockNodeFlags)ImGuiDockNodeFlagsPrivate.NoWindowMenuButton;
+    public static ImGuiDockNodeFlags WithWindowMenuButtonUnsuppressed(ImGuiDockNodeFlags flags) =>
+        flags & ~(ImGuiDockNodeFlags)ImGuiDockNodeFlagsPrivate.NoWindowMenuButton;
 
     /// <summary>
-    /// Sets <see cref="ImGuiDockNodeFlagsPrivate.NoWindowMenuButton"/> on the dock node with the given id
-    /// so its window-menu (down-arrow) button is not drawn. Resolved via <c>DockBuilderGetNode</c> because
-    /// the per-window <c>DockNode</c> pointer reads as null from this hook. Idempotent and best-effort.
+    /// Clears <see cref="ImGuiDockNodeFlagsPrivate.NoWindowMenuButton"/> on the dock node with the given id
+    /// so its native window-menu (down-arrow) button is rendered. Resolved via <c>DockBuilderGetNode</c>
+    /// because the per-window <c>DockNode</c> pointer reads as null from this hook. Idempotent and best-effort.
     /// </summary>
-    // Tracks the screen rect of each dock group's minimize button so a press that started on the button
-    // (not a drag from elsewhere) triggers the minimize on release, keyed by dock id.
-    private readonly Dictionary<uint, bool> dockButtonPressed = new();
-
-    /// <summary>
-    /// Draws a minimize button at the right end of a docked tab group's tab bar and minimizes the whole
-    /// group when it is clicked. Uses the foreground draw list (so plugin content cannot obscure it) and
-    /// manual hit-testing, since the button lives outside any plugin's Begin/End scope (issue #25).
-    /// </summary>
-    private unsafe void DrawDockGroupMinimizeButton(uint dockId, List<TrackedWindow> members)
+    private void UnsuppressDockNodeWindowMenuButton(uint dockId)
     {
         try
         {
-            if (members.Count == 0) return;
+            if (dockId == 0) return;
+            var node = ImGuiP.DockBuilderGetNode(dockId);
+            if (!node.IsNull)
+                node.LocalFlags = WithWindowMenuButtonUnsuppressed(node.LocalFlags);
+        }
+        catch
+        {
+            // Never let a dock-node tweak disrupt the draw loop.
+        }
+    }
+
+    /// <summary>
+    /// Intercepts clicks on the native dock-node window-menu (down-arrow) button by checking whether ImGui
+    /// has opened the dock node's "#WindowMenu" popup this frame. When triggered, the popup is immediately
+    /// closed and the dock group is minimized to the toolbar, matching the collapse-button behavior of
+    /// standalone windows (issue #59).
+    /// </summary>
+    private unsafe void HandleDockGroupMinimizeButton(uint dockId, List<TrackedWindow> members)
+    {
+        try
+        {
+            if (members.Count == 0 || dockId == 0) return;
+
+            var ctx = ImGui.GetCurrentContext();
+            if (ctx.IsNull || ctx.OpenPopupStack.Size == 0) return;
 
             var node = ImGuiP.DockBuilderGetNode(dockId);
             if (node.IsNull) return;
@@ -597,92 +611,23 @@ public class ImGuiContextMonitor
             var host = node.HostWindow;
             if (host.IsNull) return;
 
-            var tabBar = node.TabBar;
-            if (tabBar.IsNull) return;
+            var popupIdWithNode = ImGuiP.GetIDWithSeed("#WindowMenu", dockId);
+            var popupIdWithHost = host.GetID("#WindowMenu");
 
-            var bar = tabBar.BarRect;
-            var height = bar.Max.Y - bar.Min.Y;
-            if (height <= 1f) return;
-
-            // Position: a compact square centered vertically in the tab bar, inset from the right edge by
-            // ImGui's frame padding so it sits just inside the bar like a native titlebar control.
-            var centerX = bar.Max.X - ImGui.GetStyle().FramePadding.X - height;
-            var centerY = bar.Min.Y + height * 0.5f;
-            var side = height * 0.72f;
-            var half = side * 0.5f;
-            var x0 = centerX - half;
-            var x1 = centerX + half;
-            var y0 = centerY - half;
-            var y1 = centerY + half;
-            var min = new System.Numerics.Vector2(x0, y0);
-            var max = new System.Numerics.Vector2(x1, y1);
-
-            // Draw into the host window's own draw list (not the foreground) so windows stacked above the
-            // dock node correctly cover the button instead of it floating on top of everything (issue #25).
-            var drawList = host.DrawList;
-            if (drawList.IsNull) return;
-
-            var mouse = ImGui.GetMousePos();
-            var overRect = mouse.X >= x0 && mouse.X <= x1 && mouse.Y >= y0 && mouse.Y <= y1;
-
-            // Only treat the button as hovered when the window under the cursor belongs to this dock node's
-            // window tree. If another (overlapping) window is on top, ImGui reports it as the hovered window,
-            // so we neither highlight nor accept clicks through the occluding window (issue #25).
-            var notOccluded = false;
-            var ctx = ImGui.GetCurrentContext();
-            if (!ctx.IsNull && !ctx.HoveredWindow.IsNull && !host.RootWindowDockTree.IsNull)
+            for (var p = ctx.OpenPopupStack.Size - 1; p >= 0; p--)
             {
-                notOccluded = (IntPtr)ctx.HoveredWindow.RootWindowDockTree.Handle ==
-                              (IntPtr)host.RootWindowDockTree.Handle;
-            }
-
-            var hovered = overRect && notOccluded;
-            if (hovered)
-                drawList.AddRectFilled(min, max, ImGui.GetColorU32(ImGuiCol.ButtonHovered), 3f);
-
-            // Minimize glyph: a short horizontal bar near the bottom (the conventional "_" affordance).
-            var lineY = centerY + side * 0.18f;
-            var pad = side * 0.26f;
-            drawList.AddLine(
-                new System.Numerics.Vector2(x0 + pad, lineY),
-                new System.Numerics.Vector2(x1 - pad, lineY),
-                ImGui.GetColorU32(ImGuiCol.Text),
-                MathF.Max(1f, side * 0.09f));
-
-            // Click = press and release both over the button, so a drag that happens to end here does not
-            // fire it, and a press that started here but drifted off does not either.
-            var pressed = this.dockButtonPressed.GetValueOrDefault(dockId);
-            if (hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
-            {
-                this.dockButtonPressed[dockId] = true;
-            }
-            else if (ImGui.IsMouseReleased(ImGuiMouseButton.Left))
-            {
-                if (pressed && hovered)
+                var popup = ctx.OpenPopupStack[p];
+                if (popup.PopupId == popupIdWithNode || popup.PopupId == popupIdWithHost || popup.OpenParentId == dockId)
                 {
+                    ImGuiP.ClosePopupToLevel(p, false);
                     this.windowManager.Minimize(members[0]);
+                    break;
                 }
-                this.dockButtonPressed[dockId] = false;
             }
         }
         catch
         {
-            // A tab-bar draw failure must never disrupt the draw loop.
-        }
-    }
-
-    private void SuppressDockNodeWindowMenuButton(uint dockId)
-    {
-        try
-        {
-            if (dockId == 0) return;
-            var node = ImGuiP.DockBuilderGetNode(dockId);
-            if (!node.IsNull)
-                node.LocalFlags = WithWindowMenuButtonSuppressed(node.LocalFlags);
-        }
-        catch
-        {
-            // Never let a dock-node tweak disrupt the draw loop.
+            // Never let a dock minimize check disrupt the draw loop.
         }
     }
 

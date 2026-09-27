@@ -69,24 +69,26 @@ public class ImGuiContextMonitorValidationTests
     }
 
     [Fact]
-    public void WithWindowMenuButtonSuppressed_SetsInternalNoWindowMenuButtonFlag()
+    public void WithWindowMenuButtonUnsuppressed_ClearsInternalNoWindowMenuButtonFlag()
     {
-        // The down-arrow window-menu button on a docked tab group is hidden via the internal
-        // NoWindowMenuButton dock-node flag (issue #25).
-        var result = ImGuiContextMonitor.WithWindowMenuButtonSuppressed(Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.None);
+        // The down-arrow window-menu button on a docked tab group is unsuppressed by clearing
+        // the internal NoWindowMenuButton dock-node flag (issue #59).
+        var suppressed = (Dalamud.Bindings.ImGui.ImGuiDockNodeFlags)Dalamud.Bindings.ImGui.ImGuiDockNodeFlagsPrivate.NoWindowMenuButton;
+        var result = ImGuiContextMonitor.WithWindowMenuButtonUnsuppressed(suppressed);
 
-        Assert.True(((long)result & (long)Dalamud.Bindings.ImGui.ImGuiDockNodeFlagsPrivate.NoWindowMenuButton) != 0);
+        Assert.True(((long)result & (long)Dalamud.Bindings.ImGui.ImGuiDockNodeFlagsPrivate.NoWindowMenuButton) == 0);
     }
 
     [Fact]
-    public void WithWindowMenuButtonSuppressed_PreservesExistingFlagsAndIsIdempotent()
+    public void WithWindowMenuButtonUnsuppressed_PreservesExistingFlagsAndIsIdempotent()
     {
-        var withExisting = Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize;
-        var once = ImGuiContextMonitor.WithWindowMenuButtonSuppressed(withExisting);
-        var twice = ImGuiContextMonitor.WithWindowMenuButtonSuppressed(once);
+        var withFlags = Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize | (Dalamud.Bindings.ImGui.ImGuiDockNodeFlags)Dalamud.Bindings.ImGui.ImGuiDockNodeFlagsPrivate.NoWindowMenuButton;
+        var once = ImGuiContextMonitor.WithWindowMenuButtonUnsuppressed(withFlags);
+        var twice = ImGuiContextMonitor.WithWindowMenuButtonUnsuppressed(once);
 
-        // Existing flags survive, and re-applying does not change the result.
+        // Existing flags survive, the suppressed flag is cleared, and re-applying does not change the result.
         Assert.True((once & Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.NoResize) != 0);
+        Assert.True(((long)once & (long)Dalamud.Bindings.ImGui.ImGuiDockNodeFlagsPrivate.NoWindowMenuButton) == 0);
         Assert.Equal(once, twice);
     }
 
@@ -137,6 +139,13 @@ public class ImGuiContextMonitorValidationTests
     {
         Assert.Equal(expected, ImGuiContextMonitor.IsWindowActive(active, wasActive));
     }
+    [Fact]
+    public void WithWindowMenuButtonUnsuppressed_WhenNone_RemainsNone()
+    {
+        var result = ImGuiContextMonitor.WithWindowMenuButtonUnsuppressed(Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.None);
+        Assert.Equal(Dalamud.Bindings.ImGui.ImGuiDockNodeFlags.None, result);
+    }
+
     [Fact]
     public void ClearUnmanagedCache_EmptiesUnmanagedWindowCache()
     {
