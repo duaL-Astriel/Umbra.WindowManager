@@ -136,6 +136,15 @@ public class ImGuiContextMonitor
         active || wasActive;
 
     /// <summary>
+    /// Whether a window's dock state this frame may change its dock-group membership. A window that is
+    /// minimized or closed still passes <see cref="IsWindowActive"/> for one frame via <c>WasActive</c> and
+    /// keeps reporting its old dock id. Letting that stale frame through rebuilt the group from just the
+    /// windows whose plugin happened to draw before the minimize, so restoring brought back only those.
+    /// </summary>
+    public static bool ShouldUpdateDockMembership(bool isMinimized, bool isUnderlyingOpen) =>
+        !isMinimized && isUnderlyingOpen;
+
+    /// <summary>
     /// Decides whether a raw-ImGui window should minimize to the toolbar this frame from a title-bar
     /// affordance (issue #38). Raw windows have no <see cref="Dalamud.Interface.Windowing.IWindow"/> and so
     /// get no injected title-bar button, but the native collapse arrow and a title-bar double-click can
@@ -458,7 +467,11 @@ public class ImGuiContextMonitor
             // 2. Dock node tracking. Windows are grouped by their shared DockId (the DockNode pointer is
             // null from here). Background tabs -- whose DockIsActive is false but which are still docked
             // and node-visible -- are collected too, so the group keeps all its members (issue #25).
-            if (isDocked)
+            if (!ShouldUpdateDockMembership(tracked.IsMinimized, tracked.IsUnderlyingOpen))
+            {
+                // Hidden by us or closed: keep its DockGroupKey so a restore still goes through the group.
+            }
+            else if (isDocked)
             {
                 var dockId = win.DockId;
                 if (!this.dockGroups.TryGetValue(dockId, out var groupMembers))
