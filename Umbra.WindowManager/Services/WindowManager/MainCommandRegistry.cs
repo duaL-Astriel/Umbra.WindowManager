@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Text;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 
 namespace Umbra.WindowManager.Services.WindowManager;
@@ -23,6 +24,7 @@ public static class MainCommandRegistry
     private static readonly Dictionary<AgentId, MainCommandEntry> AgentMap = new();
     private static readonly Dictionary<uint, MainCommandEntry> CommandMap = new();
     private static readonly List<MainCommandEntry> AllEntries = [];
+    private const int MaxAddonNameLength = 64;
 
     static MainCommandRegistry()
     {
@@ -117,6 +119,28 @@ public static class MainCommandRegistry
             return false;
 
         return AddonMap.TryGetValue(addonName, out entry);
+    }
+
+    /// <summary>
+    /// Allocation-free lookup from the raw (NUL-padded, UTF-8) name buffer of a native addon, for scans that
+    /// visit every loaded addon and would otherwise build a managed string just to discard it (issue #65).
+    /// Case-insensitive, like <see cref="TryGetByAddonName(string?, out MainCommandEntry?)"/>.
+    /// </summary>
+    public static bool TryGetByUtf8AddonName(ReadOnlySpan<byte> utf8Name, [NotNullWhen(true)] out MainCommandEntry? entry)
+    {
+        entry = null;
+
+        var nul = utf8Name.IndexOf((byte)0);
+        if (nul >= 0)
+            utf8Name = utf8Name[..nul];
+
+        // Registered addon names are short ASCII; anything longer cannot match.
+        if (utf8Name.IsEmpty || utf8Name.Length > MaxAddonNameLength)
+            return false;
+
+        Span<char> chars = stackalloc char[MaxAddonNameLength];
+        var written = Encoding.UTF8.GetChars(utf8Name, chars);
+        return AddonMap.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(chars[..written], out entry);
     }
 
     public static bool TryGetByAgentId(AgentId agentId, [NotNullWhen(true)] out MainCommandEntry? entry)

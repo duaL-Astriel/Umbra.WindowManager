@@ -26,6 +26,9 @@ public class GameWindowTracker : IDisposable
     private readonly ConcurrentDictionary<string, GameWindowAdapter> knownAdapters = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<uint, byte[]?> iconCache = new();
 
+    // Scratch set for ScanActiveWindows, cleared at the start of every scan; never exposed or retained across scans.
+    private readonly HashSet<string> activeAddonNames = new(StringComparer.OrdinalIgnoreCase);
+
     [PluginService]
     private IAddonLifecycle? InjectedAddonLifecycle { get; set; }
 
@@ -278,7 +281,7 @@ public class GameWindowTracker : IDisposable
     {
         GameWindowAdapter.DiagLog($"[TrackOrUpdateAddon] START: Addon={entry.AddonName} addr=0x{address:X} isNativeShow={isNativeShow}");
         // Clean up any sibling/related tab adapter in the same window family so only the active tab is tracked
-        foreach (var existingKey in this.knownAdapters.Keys.ToList())
+        foreach (var (existingKey, _) in this.knownAdapters)
         {
             if (!string.Equals(existingKey, entry.AddonName, StringComparison.OrdinalIgnoreCase) &&
                 GameWindowAdapter.IsKnownTabOrChildAddon(existingKey, entry.AddonName))
@@ -350,18 +353,19 @@ public class GameWindowTracker : IDisposable
             var entries = list.Entries;
             var count = list.Count;
 
-            var activeAddonNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var activeAddonNames = this.activeAddonNames;
+            activeAddonNames.Clear();
 
             for (var i = 0; i < count; i++)
             {
                 var unit = entries[i].Value;
                 if (unit == null) continue;
 
-                var name = unit->NameString;
-                if (string.IsNullOrEmpty(name)) continue;
-
-                if (!MainCommandRegistry.TryGetByAddonName(name, out var entry))
+                // Probe by raw name bytes first: most loaded addons are not tracked, and NameString allocates.
+                if (!MainCommandRegistry.TryGetByUtf8AddonName(unit->Name, out var entry))
                     continue;
+
+                var name = unit->NameString;
 
                 if (GameWindowAdapter.IsChildTabAddonName(name) &&
                     !GameWindowAdapter.IsChildTabAddonName(entry.AddonName))
