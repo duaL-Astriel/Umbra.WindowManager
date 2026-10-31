@@ -163,23 +163,75 @@ public class DalamudWindowTracker : IDisposable
     private int isScanning;
     private int scanPending;
 
+    // Wall-clock budget a single tick may spend on the plugin discovery pass before it yields back to the
+    // game loop and resumes on the next frame (issue #62). Tests shrink or widen it to drive a pass tick by tick.
+    internal TimeSpan ScanSliceBudget = TimeSpan.FromMilliseconds(1);
+
+    // The discovery pass in progress. A single instance is reused so its snapshot list and seen-set are not
+    // reallocated per pass; both are emptied when a pass ends so it never pins unloaded plugin objects.
+    private readonly ScanPass pass = new();
+    private volatile bool passActive;
+
+    // Reused across passes; rebuilt from PluginManager.AvailablePlugins at the start of each one.
+    private readonly Dictionary<string, string> availableIconUrls = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 2 s cadence: requests a fresh discovery pass (unless one is already running) and spends the first
+    /// slice on it. The pass itself is spread across later frames by <see cref="ContinueScan"/>.
+    /// </summary>
     [OnTick(interval: 2000)]
     public void ScanPlugins()
     {
-        if (System.Threading.Interlocked.CompareExchange(ref this.isScanning, 1, 0) != 0)
-        {
-            System.Threading.Interlocked.Exchange(ref this.scanPending, 1);
+        if (!this.passActive)
+            this.RequestScan();
+
+        this.ContinueScan();
+    }
+
+    /// <summary>
+    /// Marks a discovery pass as wanted. Safe from any thread (plugin lifecycle events fire off the
+    /// framework thread); the pass itself always runs on the framework thread, from <see cref="ContinueScan"/>.
+    /// </summary>
+    private void RequestScan() => System.Threading.Interlocked.Exchange(ref this.scanPending, 1);
+
+    /// <summary>
+    /// Every frame: advances the pass in progress, or starts one if a change event or the 2 s tick requested
+    /// it. Does nothing (one volatile read) while idle. At most <see cref="ScanSliceBudget"/> is spent per
+    /// call; a pass that does not fit resumes on the next frame (issue #62).
+    /// </summary>
+    [OnTick(interval: 0)]
+    public void ContinueScan()
+    {
+        if (!this.passActive && System.Threading.Volatile.Read(ref this.scanPending) == 0)
             return;
-        }
+
+        if (System.Threading.Interlocked.CompareExchange(ref this.isScanning, 1, 0) != 0)
+            return; // another thread is mid-slice; it keeps the pass moving and re-reads scanPending
 
         try
         {
-            do
+            var slice = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
             {
-                System.Threading.Interlocked.Exchange(ref this.scanPending, 0);
-                this.ScanPluginsCore();
+                if (!this.passActive)
+                {
+                    // Consumed even when the pass cannot start (Dalamud not ready), so an unready host is
+                    // retried on the 2 s cadence instead of being re-probed every frame.
+                    if (System.Threading.Interlocked.Exchange(ref this.scanPending, 0) == 0)
+                        return;
+
+                    this.BeginDalamudScanPass();
+                    if (!this.passActive)
+                        return;
+                }
+
+                if (!this.AdvanceScanPass(this.ScanSliceBudget - slice.Elapsed))
+                    return;
+
+                // Pass complete: a change event that arrived mid-pass rescans straight away, budget permitting.
+                if (slice.Elapsed >= this.ScanSliceBudget)
+                    return;
             }
-            while (System.Threading.Interlocked.CompareExchange(ref this.scanPending, 0, 1) == 1);
         }
         finally
         {
@@ -187,7 +239,17 @@ public class DalamudWindowTracker : IDisposable
         }
     }
 
-    private void ScanPluginsCore()
+    private void LogScanFailure(Exception ex)
+    {
+        if (this.scanFailLogCounter++ % 30 == 0)
+            Logger.Warning($"[WindowManager] Plugin discovery scan failed via reflection: {ex.GetType().Name}: {ex.Message}");
+    }
+
+    /// <summary>
+    /// Resolves Dalamud's plugin manager and snapshots its installed plugins into a new discovery pass.
+    /// Leaves no pass active when Dalamud is not ready (startup, unit tests).
+    /// </summary>
+    private void BeginDalamudScanPass()
     {
         try
         {
@@ -213,21 +275,20 @@ public class DalamudWindowTracker : IDisposable
             var installedProp = pmType.GetProperty("InstalledPlugins", BindingFlags.Public | BindingFlags.Instance);
             if (installedProp?.GetValue(pmInstance) is not IEnumerable installedPlugins) return;
 
-            Dictionary<string, string>? availableIconUrls = null;
+            this.availableIconUrls.Clear();
             try
             {
                 var availableProp = pmType.GetProperty("AvailablePlugins", BindingFlags.Public | BindingFlags.Instance);
                 if (availableProp?.GetValue(pmInstance) is IEnumerable availablePlugins)
                 {
-                    availableIconUrls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var remotePlugin in availablePlugins)
                     {
                         if (remotePlugin == null) continue;
-                        var rType = remotePlugin.GetType();
-                        var rName = rType.GetProperty("InternalName")?.GetValue(remotePlugin) as string;
-                        var rIcon = rType.GetProperty("IconUrl")?.GetValue(remotePlugin) as string;
+                        var remote = GetManifestPlan(remotePlugin.GetType());
+                        var rName = remote.InternalName?.GetValue(remotePlugin) as string;
+                        var rIcon = remote.IconUrl?.GetValue(remotePlugin) as string;
                         if (!string.IsNullOrEmpty(rName) && !string.IsNullOrWhiteSpace(rIcon))
-                            availableIconUrls[rName] = rIcon;
+                            this.availableIconUrls[rName] = rIcon;
                     }
                 }
             }
@@ -236,33 +297,39 @@ public class DalamudWindowTracker : IDisposable
                 // Best effort
             }
 
-            this.ScanInstalledPlugins(installedPlugins, availableIconUrls);
-
             // Dalamud's own core windows (Plugin Installer, Settings, Console, Data, Changelog, ...) live
             // in DalamudInterface's private WindowSystem, not in PluginManager.InstalledPlugins, so they are
-            // never reached by the loop above. Resolve DalamudInterface via the same Service<T> pattern and
+            // never reached by the plugin loop. Resolve DalamudInterface via the same Service<T> pattern and
             // scan it under a synthetic "Dalamud" context (issue #36).
-            var diType = logAssembly.GetType("Dalamud.Interface.Internal.DalamudInterface");
-            if (diType != null)
-            {
-                var diInstance = ResolveDalamudService(serviceOpenType, diType);
-                if (diInstance != null)
-                    this.ScanDalamudCoreWindows(diInstance, this.TryLoadDalamudCoreIcon(logAssembly, serviceOpenType));
-            }
-
+            //
             // Umbra's own internal windows (Settings, Widget Browser, Variable Editor, Toolbar Profile
             // Manager, Installer) live in Umbra.Windows.WindowManager, not in Dalamud's WindowSystem.
             // Discover and register them under the synthetic "Umbra" plugin context (issue #44).
-            this.ScanUmbraWindows();
+            //
+            // Both run as the last two steps of the pass, each counted against the slice budget like a plugin.
+            this.BeginScanPass(installedPlugins, this.availableIconUrls, new Action[]
+            {
+                () => this.ScanDalamudCoreStep(logAssembly, serviceOpenType),
+                this.ScanUmbraWindows,
+            });
         }
         catch (Exception ex)
         {
             // Reflection into Dalamud internals can break across Dalamud updates (renamed
             // Service`1 / instanceTcs / PluginManager / ServiceContainer). Surface it, throttled,
             // instead of failing silently so discovery breakage is diagnosable (issue #8.2).
-            if (this.scanFailLogCounter++ % 30 == 0)
-                Logger.Warning($"[WindowManager] Plugin discovery scan failed via reflection: {ex.GetType().Name}: {ex.Message}");
+            this.LogScanFailure(ex);
         }
+    }
+
+    private void ScanDalamudCoreStep(Assembly logAssembly, Type serviceOpenType)
+    {
+        var diType = logAssembly.GetType("Dalamud.Interface.Internal.DalamudInterface");
+        if (diType == null) return;
+
+        var diInstance = ResolveDalamudService(serviceOpenType, diType);
+        if (diInstance != null)
+            this.ScanDalamudCoreWindows(diInstance, this.TryLoadDalamudCoreIcon(logAssembly, serviceOpenType));
     }
 
     /// <summary>
@@ -799,11 +866,11 @@ public class DalamudWindowTracker : IDisposable
     {
         try
         {
-            var lpType = localPlugin.GetType();
-            manifest ??= lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
-            var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string;
-            var manifestIconUrl = manifest?.GetType().GetProperty("IconUrl")?.GetValue(manifest) as string;
-            var dip17Channel = manifest?.GetType().GetProperty("Dip17Channel")?.GetValue(manifest) as string;
+            manifest ??= GetLocalPluginPlan(localPlugin.GetType()).Manifest?.GetValue(localPlugin);
+            var manifestPlan = manifest != null ? GetManifestPlan(manifest.GetType()) : null;
+            var internalName = manifestPlan?.InternalName?.GetValue(manifest) as string;
+            var manifestIconUrl = manifestPlan?.IconUrl?.GetValue(manifest) as string;
+            var dip17Channel = manifestPlan?.Dip17Channel?.GetValue(manifest) as string;
 
             string? availableIconUrl = null;
             if (!string.IsNullOrEmpty(internalName) && availableIconUrls != null)
@@ -891,41 +958,66 @@ public class DalamudWindowTracker : IDisposable
         }
     }
 
+    // Plugins whose icon was looked up on disk (plugin directory + persistent icon cache) and not found.
+    // Without it every discovery pass repeated 3-4 File.Exists calls per unresolved plugin for as long as the
+    // icon stayed unresolved (issue #62). Only the disk lookup is remembered, not the final answer: the
+    // download trigger below still runs on every pass so a transient network failure is retried (issue #37).
+    // Cleared when a download for the plugin finishes and when the plugin is untracked (reload/update).
+    private readonly ConcurrentDictionary<string, byte> iconDiskMisses = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Forgets a remembered negative disk lookup so the next resolve checks the disk again.</summary>
+    internal void InvalidateIconDiskLookup(string internalName) => this.iconDiskMisses.TryRemove(internalName, out _);
+
     internal byte[]? LoadPluginIcon(object localPlugin, string? internalName, string? iconUrl)
     {
         try
         {
-            var dllFile = localPlugin.GetType().GetProperty("DllFile", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin) as FileInfo;
-            var dir = dllFile?.DirectoryName;
-            if (!string.IsNullOrEmpty(dir))
+            var hasName = !string.IsNullOrEmpty(internalName);
+            if (!hasName || !this.iconDiskMisses.ContainsKey(internalName!))
             {
-                // Dalamud plugin icon convention on disk
-                foreach (var candidate in new[] { Path.Combine(dir, "images", "icon.png"), Path.Combine(dir, "icon.png"), Path.Combine(dir, "Images", "Icon.png") })
-                {
-                    if (File.Exists(candidate))
-                        return File.ReadAllBytes(candidate);
-                }
+                var onDisk = ReadPluginIconFromDisk(localPlugin, internalName);
+                if (onDisk != null)
+                    return onDisk;
+
+                if (hasName)
+                    this.iconDiskMisses[internalName!] = 0;
             }
 
-            // Check persistent icon cache on disk
-            if (!string.IsNullOrEmpty(internalName))
+            // Not on disk: trigger background download if IconUrl is available
+            if (hasName && !this.pendingDownloads.ContainsKey(internalName!) &&
+                !string.IsNullOrWhiteSpace(iconUrl) && Uri.TryCreate(iconUrl, UriKind.Absolute, out _))
             {
-                var cachedPath = GetCachedIconPath(internalName);
-                if (File.Exists(cachedPath))
-                {
-                    return File.ReadAllBytes(cachedPath);
-                }
-
-                // If not cached, trigger background download if IconUrl is available
-                if (!string.IsNullOrWhiteSpace(iconUrl) && Uri.TryCreate(iconUrl, UriKind.Absolute, out _))
-                {
-                    this.TriggerIconDownload(internalName, iconUrl, cachedPath);
-                }
+                this.TriggerIconDownload(internalName!, iconUrl, GetCachedIconPath(internalName!));
             }
         }
         catch
         {
             // Icon is optional; fall back to a monogram in the widget.
+        }
+
+        return null;
+    }
+
+    private static byte[]? ReadPluginIconFromDisk(object localPlugin, string? internalName)
+    {
+        var dllFile = GetLocalPluginPlan(localPlugin.GetType()).DllFile?.GetValue(localPlugin) as FileInfo;
+        var dir = dllFile?.DirectoryName;
+        if (!string.IsNullOrEmpty(dir))
+        {
+            // Dalamud plugin icon convention on disk
+            foreach (var candidate in new[] { Path.Combine(dir, "images", "icon.png"), Path.Combine(dir, "icon.png"), Path.Combine(dir, "Images", "Icon.png") })
+            {
+                if (File.Exists(candidate))
+                    return File.ReadAllBytes(candidate);
+            }
+        }
+
+        // Check persistent icon cache on disk
+        if (!string.IsNullOrEmpty(internalName))
+        {
+            var cachedPath = GetCachedIconPath(internalName);
+            if (File.Exists(cachedPath))
+                return File.ReadAllBytes(cachedPath);
         }
 
         return null;
@@ -982,6 +1074,9 @@ public class DalamudWindowTracker : IDisposable
             finally
             {
                 this.pendingDownloads.TryRemove(internalName, out _);
+
+                // The download may have changed what is on disk; let the next resolve look again (issue #62).
+                this.InvalidateIconDiskLookup(internalName);
             }
         });
     }
@@ -1717,6 +1812,7 @@ public class DalamudWindowTracker : IDisposable
         }
 
         this.iconCache.TryRemove(internalName, out _);
+        this.iconDiskMisses.TryRemove(internalName, out _);
         this.knownPluginInstances.TryRemove(internalName, out _);
         this.windowManagerService.UnregisterWindowsForPlugin(internalName);
     }
@@ -1724,132 +1820,284 @@ public class DalamudWindowTracker : IDisposable
     /// <summary>
     /// Scans a collection of installed plugins to discover window systems and windows, automatically
     /// detecting plugin reloads, updates, or uninstalls and keeping window registrations up to date.
+    /// Runs the whole pass in one go; the live tick spreads the same pass across frames instead
+    /// (<see cref="ContinueScan"/>, issue #62).
     /// </summary>
     internal void ScanInstalledPlugins(IEnumerable installedPlugins, IReadOnlyDictionary<string, string>? availableIconUrls)
     {
-        var seenPlugins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var stateChanged = false;
+        this.BeginScanPass(installedPlugins, availableIconUrls, null);
+        this.AdvanceScanPass(TimeSpan.MaxValue);
+    }
 
-        var pluginsToScan = new List<object>();
+    // State of one discovery pass. Plugins is a snapshot taken when the pass begins, so the installed-plugin
+    // list changing between frames cannot skip or repeat a plugin; such a change also fires a lifecycle event,
+    // which queues a follow-up pass.
+    private sealed class ScanPass
+    {
+        public readonly List<object> Plugins = new();
+        public readonly HashSet<string> Seen = new(StringComparer.OrdinalIgnoreCase);
+        public IReadOnlyDictionary<string, string>? IconUrls;
+        public IReadOnlyList<Action>? TailSteps;
+        public int Cursor;
+        public bool StateChanged;
+        public bool PluginStepFailed;
+
+        public int StepCount => this.Plugins.Count + (this.TailSteps?.Count ?? 0);
+    }
+
+    /// <summary>
+    /// Snapshots <paramref name="installedPlugins"/> and arms a pass over them. <paramref name="tailSteps"/>
+    /// run after the last plugin and count as steps for budgeting (Dalamud core / Umbra window scans).
+    /// </summary>
+    internal void BeginScanPass(IEnumerable installedPlugins, IReadOnlyDictionary<string, string>? availableIconUrls, IReadOnlyList<Action>? tailSteps)
+    {
+        var p = this.pass;
+        p.Plugins.Clear();
+        p.Seen.Clear();
+        p.IconUrls = availableIconUrls;
+        p.TailSteps = tailSteps;
+        p.Cursor = 0;
+        p.StateChanged = false;
+        p.PluginStepFailed = false;
+
         if (installedPlugins is IList list)
         {
             for (var i = 0; i < list.Count; i++)
             {
-                var p = list[i];
-                if (p != null) pluginsToScan.Add(p);
+                var plugin = list[i];
+                if (plugin != null) p.Plugins.Add(plugin);
             }
         }
         else
         {
-            foreach (var p in installedPlugins)
+            foreach (var plugin in installedPlugins)
             {
-                if (p != null) pluginsToScan.Add(p);
+                if (plugin != null) p.Plugins.Add(plugin);
             }
         }
 
-        foreach (var localPlugin in pluginsToScan)
+        this.passActive = true;
+    }
+
+    internal bool IsScanPassActive => this.passActive;
+
+    /// <summary>
+    /// Runs steps of the current pass until <paramref name="budget"/> is spent, always completing at least
+    /// one so a pass makes progress even on a zero budget. Returns <c>true</c> once the pass has finished
+    /// (or none is active), <c>false</c> if steps remain for a later frame.
+    /// </summary>
+    internal bool AdvanceScanPass(TimeSpan budget)
+    {
+        if (!this.passActive)
+            return true;
+
+        var p = this.pass;
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        while (p.Cursor < p.StepCount)
         {
-            var lpType = localPlugin.GetType();
-            var manifest = lpType.GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin);
-            var isHide = manifest?.GetType().GetProperty("IsHide")?.GetValue(manifest) as bool? ?? false;
-            if (isHide) continue;
-
-            var internalName = manifest?.GetType().GetProperty("InternalName")?.GetValue(manifest) as string
-                            ?? lpType.GetProperty("InternalName", BindingFlags.Public | BindingFlags.Instance)?.GetValue(localPlugin) as string;
-
-            var pluginInstanceField = lpType.GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
-            var pluginObj = pluginInstanceField?.GetValue(localPlugin);
-
-            if (!string.IsNullOrEmpty(internalName))
-            {
-                if (pluginObj == null)
-                {
-                    if (this.hookedPluginInterface != null)
-                    {
-                        var piCheckProp = lpType.GetProperty("DalamudInterface", BindingFlags.Public | BindingFlags.Instance)
-                                       ?? lpType.GetProperty("PluginInterface", BindingFlags.Public | BindingFlags.Instance);
-                        var piCheckInstance = piCheckProp?.GetValue(localPlugin);
-                        if (piCheckInstance != null && ReferenceEquals(this.hookedPluginInterface, piCheckInstance))
-                        {
-                            this.UnhookPluginInterface();
-                        }
-                    }
-
-                    // Plugin is unloaded or disabled
-                    if (this.knownPluginInstances.TryRemove(internalName, out _))
-                    {
-                        this.UntrackPlugin(internalName);
-                        stateChanged = true;
-                    }
-                    continue;
-                }
-
-                seenPlugins.Add(internalName);
-
-                // Detect reload or instance replacement
-                if (this.knownPluginInstances.TryGetValue(internalName, out var oldObjRef))
-                {
-                    if (!oldObjRef.TryGetTarget(out var oldObj) || !ReferenceEquals(oldObj, pluginObj))
-                    {
-                        // Instance changed! Plugin reloaded or updated
-                        this.UntrackPlugin(internalName);
-                        this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
-                        stateChanged = true;
-                    }
-                }
-                else
-                {
-                    this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
-                    stateChanged = true;
-                }
-            }
-            else if (pluginObj == null)
-            {
-                continue;
-            }
-
-            var piProp = lpType.GetProperty("DalamudInterface", BindingFlags.Public | BindingFlags.Instance)
-                      ?? lpType.GetProperty("PluginInterface", BindingFlags.Public | BindingFlags.Instance);
-            var piInstance = piProp?.GetValue(localPlugin);
-            if (piInstance != null)
-            {
-                if (string.Equals(internalName, "Umbra", StringComparison.OrdinalIgnoreCase))
-                {
-                    this.TryHookPreferredPluginInterfaceEvents(piInstance);
-                }
-                else
-                {
-                    this.TryHookPluginInterfaceEvents(piInstance);
-                }
-            }
-
-            this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, availableIconUrls);
+            var step = p.Cursor++;
             try
             {
-                this.ScanObjectForWindowSystems(pluginObj);
+                if (step < p.Plugins.Count)
+                    this.ScanOnePlugin(p.Plugins[step], p);
+                else
+                    p.TailSteps![step - p.Plugins.Count]();
             }
-            finally
+            catch (Exception ex)
             {
-                this.currentPluginContext = null;
+                // One misbehaving plugin must not starve every plugin after it on each pass.
+                if (step < p.Plugins.Count)
+                    p.PluginStepFailed = true;
+
+                this.LogScanFailure(ex);
+            }
+
+            if (elapsed.Elapsed >= budget)
+                break;
+        }
+
+        if (p.Cursor < p.StepCount)
+            return false;
+
+        this.FinishScanPass(p);
+        return true;
+    }
+
+    private void ScanOnePlugin(object localPlugin, ScanPass p)
+    {
+        var lpType = localPlugin.GetType();
+        var lpPlan = GetLocalPluginPlan(lpType);
+        var manifest = lpPlan.Manifest?.GetValue(localPlugin);
+        var manifestPlan = manifest != null ? GetManifestPlan(manifest.GetType()) : null;
+        var isHide = manifestPlan?.IsHide?.GetValue(manifest) as bool? ?? false;
+        if (isHide) return;
+
+        var internalName = manifestPlan?.InternalName?.GetValue(manifest) as string
+                        ?? lpPlan.InternalName?.GetValue(localPlugin) as string;
+
+        var pluginObj = lpPlan.Instance?.GetValue(localPlugin);
+
+        if (!string.IsNullOrEmpty(internalName))
+        {
+            if (pluginObj == null)
+            {
+                if (this.hookedPluginInterface != null)
+                {
+                    var piCheckInstance = lpPlan.PluginInterface?.GetValue(localPlugin);
+                    if (piCheckInstance != null && ReferenceEquals(this.hookedPluginInterface, piCheckInstance))
+                    {
+                        this.UnhookPluginInterface();
+                    }
+                }
+
+                // Plugin is unloaded or disabled
+                if (this.knownPluginInstances.TryRemove(internalName, out _))
+                {
+                    this.UntrackPlugin(internalName);
+                    p.StateChanged = true;
+                }
+                return;
+            }
+
+            p.Seen.Add(internalName);
+
+            // Detect reload or instance replacement
+            if (this.knownPluginInstances.TryGetValue(internalName, out var oldObjRef))
+            {
+                if (!oldObjRef.TryGetTarget(out var oldObj) || !ReferenceEquals(oldObj, pluginObj))
+                {
+                    // Instance changed! Plugin reloaded or updated
+                    this.UntrackPlugin(internalName);
+                    this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                    p.StateChanged = true;
+                }
+            }
+            else
+            {
+                this.knownPluginInstances[internalName] = new WeakReference<object>(pluginObj);
+                p.StateChanged = true;
+            }
+        }
+        else if (pluginObj == null)
+        {
+            return;
+        }
+
+        var piInstance = lpPlan.PluginInterface?.GetValue(localPlugin);
+        if (piInstance != null)
+        {
+            if (string.Equals(internalName, "Umbra", StringComparison.OrdinalIgnoreCase))
+            {
+                this.TryHookPreferredPluginInterfaceEvents(piInstance);
+            }
+            else
+            {
+                this.TryHookPluginInterfaceEvents(piInstance);
             }
         }
 
-        // Untrack any plugins that were uninstalled or removed from installedPlugins
-        foreach (var trackedName in this.knownPluginInstances.Keys)
+        this.currentPluginContext = this.ResolvePluginContext(localPlugin, manifest, p.IconUrls);
+        try
         {
-            if (!seenPlugins.Contains(trackedName))
+            this.ScanObjectForWindowSystems(pluginObj);
+        }
+        finally
+        {
+            this.currentPluginContext = null;
+        }
+    }
+
+    private void FinishScanPass(ScanPass p)
+    {
+        // Untrack any plugins that were uninstalled or removed from installedPlugins. Only meaningful once
+        // every plugin has been visited, and skipped if a plugin's step threw: its name may be missing from
+        // the seen-set only because the scan never got far enough to record it.
+        if (!p.PluginStepFailed)
+        {
+            foreach (var trackedName in this.knownPluginInstances.Keys)
             {
-                this.UntrackPlugin(trackedName);
-                this.knownPluginInstances.TryRemove(trackedName, out _);
-                stateChanged = true;
+                if (!p.Seen.Contains(trackedName))
+                {
+                    this.UntrackPlugin(trackedName);
+                    this.knownPluginInstances.TryRemove(trackedName, out _);
+                    p.StateChanged = true;
+                }
             }
         }
+
+        var stateChanged = p.StateChanged;
+
+        // Drop the snapshot so an idle tracker never pins unloaded plugin objects (collectible ALCs).
+        p.Plugins.Clear();
+        p.Seen.Clear();
+        p.IconUrls = null;
+        p.TailSteps = null;
+        this.passActive = false;
 
         if (stateChanged)
         {
             this.PluginReloaded?.Invoke();
         }
     }
+
+    private sealed class LocalPluginPlan
+    {
+        public readonly PropertyInfo? Manifest;
+        public readonly PropertyInfo? InternalName;
+        public readonly PropertyInfo? PluginInterface;
+        public readonly PropertyInfo? DllFile;
+        public readonly FieldInfo? Instance;
+
+        public LocalPluginPlan(Type type)
+        {
+            const BindingFlags publicInstance = BindingFlags.Public | BindingFlags.Instance;
+            this.Manifest = type.GetProperty("Manifest", publicInstance);
+            this.InternalName = type.GetProperty("InternalName", publicInstance);
+            this.PluginInterface = type.GetProperty("DalamudInterface", publicInstance)
+                                ?? type.GetProperty("PluginInterface", publicInstance);
+            this.DllFile = type.GetProperty("DllFile", publicInstance);
+            this.Instance = type.GetField("instance", BindingFlags.NonPublic | BindingFlags.Instance);
+        }
+    }
+
+    private sealed class ManifestPlan
+    {
+        public readonly PropertyInfo? InternalName;
+        public readonly PropertyInfo? IconUrl;
+        public readonly PropertyInfo? Dip17Channel;
+        public readonly PropertyInfo? IsHide;
+
+        public ManifestPlan(Type type)
+        {
+            this.InternalName = type.GetProperty("InternalName");
+            this.IconUrl = type.GetProperty("IconUrl");
+            this.Dip17Channel = type.GetProperty("Dip17Channel");
+            this.IsHide = type.GetProperty("IsHide");
+        }
+    }
+
+    // Weak-keyed for the same reason as TypeScanCache: LocalPlugin and manifest types are not collectible,
+    // but remote-manifest types and test doubles may be, and a strong Dictionary<Type,_> would pin them.
+    // Resolved once per type instead of 5-8 GetProperty/GetField calls per plugin per pass (issue #62).
+    private static readonly ConditionalWeakTable<Type, LocalPluginPlan> LocalPluginPlans = new();
+    private static readonly ConditionalWeakTable<Type, ManifestPlan> ManifestPlans = new();
+
+    // Diagnostics only: how many plans have been built, so tests can assert the caches actually hit.
+    internal static long PluginAccessPlansBuilt;
+
+    private static LocalPluginPlan GetLocalPluginPlan(Type type) =>
+        LocalPluginPlans.GetValue(type, static t =>
+        {
+            System.Threading.Interlocked.Increment(ref PluginAccessPlansBuilt);
+            return new LocalPluginPlan(t);
+        });
+
+    private static ManifestPlan GetManifestPlan(Type type) =>
+        ManifestPlans.GetValue(type, static t =>
+        {
+            System.Threading.Interlocked.Increment(ref PluginAccessPlansBuilt);
+            return new ManifestPlan(t);
+        });
 
     internal void TryHookPluginManagerEvents(object pmInstance)
     {
@@ -1952,14 +2200,16 @@ public class DalamudWindowTracker : IDisposable
         this.onActivePluginsChangedHandler = null;
     }
 
+    // Lifecycle events only request a pass: they can fire off the framework thread, and the scan traverses
+    // plugin objects and mutates window state, so it runs from the next ContinueScan tick (issue #62).
     private void OnInstalledPluginsChanged()
     {
-        this.ScanPlugins();
+        this.RequestScan();
     }
 
     private void OnActivePluginsChanged(Dalamud.Plugin.IActivePluginsChangedEventArgs args)
     {
-        this.ScanPlugins();
+        this.RequestScan();
     }
 
     public void Dispose()
@@ -1983,6 +2233,8 @@ public class DalamudWindowTracker : IDisposable
         this.UnhookPluginInterface();
         this.UnhookUmbraWindowManagerEvents();
         this.knownUmbraWindows.Clear();
+        this.passActive = false;
+        this.pass.Plugins.Clear();
     }
 
 
