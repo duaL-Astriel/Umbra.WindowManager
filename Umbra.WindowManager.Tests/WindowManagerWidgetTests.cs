@@ -1454,7 +1454,250 @@ public class WindowManagerWidgetTests
         Assert.Single(widget.WindowNodes);
         Assert.True(widget.WindowNodes.ContainsKey(win1.WindowName));
     }
+
+    // --- Steady-state allocation + cache invalidation (issue #63) ---------------------------------------
+
+    // Bytes the widget itself allocates per steady-state tick. WindowManagerService's own per-tick cost
+    // (its visible-window scan) is measured separately and subtracted: it is outside the widget.
+    private static long MeasureAllocatedBytesPerTick(WindowManagerService service, WindowManagerWidget widget, int ticks = 20)
+    {
+        // Warm up so first-use costs (node creation, tooltip caches, JIT) are out of the measurement.
+        var scratch = new List<TrackedWindow>();
+        for (var i = 0; i < 5; i++)
+        {
+            widget.UpdateButtons();
+            service.GetVisibleAndMinimizedWindows(scratch);
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < ticks; i++)
+            service.GetVisibleAndMinimizedWindows(scratch);
+        var serviceBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < ticks; i++)
+            widget.UpdateButtons();
+        var widgetBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        return Math.Max(0, widgetBytes - serviceBytes) / ticks;
+    }
+
+    // Generous slack for incidental runtime allocations; the old per-tick cost was several KB.
+    private const long SteadyStateTolerance = 64;
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("SomethingElse, Another")]
+    public void UpdateButtons_SteadyState_InlineButtons_AllocatesNothing(string blacklist)
+    {
+        var service = new WindowManagerService();
+        var a = service.RegisterWindow(new DummyWindow("Alpha##a") { IsOpen = true, IsFocused = true });
+        var b = service.RegisterWindow(new DummyWindow("Beta##b") { IsOpen = true });
+        service.RegisterWindow(new DummyWindow("Gamma##c") { IsOpen = true });
+        b.IsMinimized = true;
+        a.IconBytes = new byte[] { 1, 2, 3 };
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.Blacklist = blacklist;
+
+        Assert.True(MeasureAllocatedBytesPerTick(service, widget) <= SteadyStateTolerance);
+        Assert.Equal(3, widget.WindowNodes.Count);
+    }
+
+    [Fact]
+    public void UpdateButtons_SteadyState_DockGroups_AllocateNothing()
+    {
+        var service = new WindowManagerService();
+        var pair = new[]
+        {
+            service.RegisterWindow(new DummyWindow("Penumbra##id1") { IsOpen = true }),
+            service.RegisterWindow(new DummyWindow("Glamourer##id2") { IsOpen = true })
+        };
+        var trio = new[]
+        {
+            service.RegisterWindow(new DummyWindow("Heals##id3") { IsOpen = true, IsFocused = true }),
+            service.RegisterWindow(new DummyWindow("Tanks##id4") { IsOpen = true }),
+            service.RegisterWindow(new DummyWindow("Dps##id5") { IsOpen = true })
+        };
+        service.RegisterDockGroup("dock_pair", "Penumbra##id1", pair);
+        service.RegisterDockGroup("dock_trio", "Heals##id3", trio);
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+
+        Assert.True(MeasureAllocatedBytesPerTick(service, widget) <= SteadyStateTolerance);
+        Assert.Equal(2, widget.WindowNodes.Count);
+        Assert.StartsWith("Docked Plugins:", widget.WindowNodes["dock_trio"].Tooltip);
+    }
+
+    // The popup rows can't be exercised here (MenuPopup needs the live Umbra runtime), but the trigger
+    // node's cached badge and tooltip text must still follow the window count.
+    [Fact]
+    public void UpdateButtons_Dropdown_BadgeAndTooltipFollowWindowCount()
+    {
+        var service = new WindowManagerService();
+        service.RegisterWindow(new DummyWindow("Alpha##a") { IsOpen = true });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Dropdown";
+        widget.UpdateButtons();
+        widget.UpdateButtons();
+
+        var dropdown = widget.Node.ChildNodes[0];
+        var badge = dropdown.ChildNodes.First(c => c.Id == "badge");
+        Assert.Equal("1", badge.NodeValue);
+        Assert.Equal("1 open window", dropdown.Tooltip);
+
+        service.RegisterWindow(new DummyWindow("Beta##b") { IsOpen = true });
+        service.RegisterWindow(new DummyWindow("Gamma##c") { IsOpen = true });
+        widget.UpdateButtons();
+
+        Assert.Equal("3", badge.NodeValue);
+        Assert.Equal("3 open windows", dropdown.Tooltip);
+    }
+
+    [Fact]
+    public void GetParsedBlacklist_IsCachedUntilTextChanges()
+    {
+        var widget = CreateWidget(new WindowManagerService());
+
+        var empty = widget.GetParsedBlacklist();
+        Assert.Empty(empty);
+        Assert.Same(empty, widget.GetParsedBlacklist());
+
+        widget.Blacklist = "One, Two";
+        var parsed = widget.GetParsedBlacklist();
+        Assert.Equal(2, parsed.Count);
+        Assert.Contains("two", parsed);
+        Assert.Same(parsed, widget.GetParsedBlacklist());
+
+        widget.Blacklist = "Three";
+        var reparsed = widget.GetParsedBlacklist();
+        Assert.NotSame(parsed, reparsed);
+        Assert.Single(reparsed);
+
+        widget.Blacklist = "";
+        Assert.Empty(widget.GetParsedBlacklist());
+    }
+
+    [Fact]
+    public void UpdateButtons_BlacklistEditsTakeEffectBetweenTicks()
+    {
+        var service = new WindowManagerService();
+        service.RegisterWindow(new DummyWindow("Keep"));
+        service.RegisterWindow(new DummyWindow("Hide"));
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+        Assert.Equal(2, widget.WindowNodes.Count);
+
+        widget.Blacklist = "Hide";
+        widget.UpdateButtons();
+        Assert.Single(widget.WindowNodes);
+        Assert.False(widget.WindowNodes.ContainsKey("Hide"));
+
+        widget.Blacklist = "";
+        widget.UpdateButtons();
+        Assert.Equal(2, widget.WindowNodes.Count);
+    }
+
+    [Fact]
+    public void AddToBlacklist_DoesNotMutateCachedSetAndKeepsExistingEntries()
+    {
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(new DummyWindow("Second"));
+        service.RegisterWindow(new DummyWindow("First"));
+
+        var widget = CreateWidget(service);
+        widget.Blacklist = "First";
+        var before = widget.GetParsedBlacklist();
+
+        widget.AddToBlacklist(tw);
+
+        Assert.Single(before);
+        Assert.Equal(2, widget.GetParsedBlacklist().Count);
+        Assert.Empty(widget.WindowNodes);
+    }
+
+    [Fact]
+    public void UpdateButtons_IconChangeAfterSteadyState_UpdatesIconNode()
+    {
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(new DummyWindow("Alpha##a") { IsOpen = true });
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+        widget.UpdateButtons();
+        var iconNode = widget.WindowNodes["Alpha##a"].ChildNodes[0];
+        Assert.Equal("A", iconNode.NodeValue);
+
+        var png = new byte[] { 9, 9 };
+        tw.IconBytes = png;
+        widget.UpdateButtons();
+        Assert.Null(iconNode.NodeValue);
+        Assert.Same(png, iconNode.Style.ImageBytes);
+
+        tw.IconBytes = null;
+        widget.UpdateButtons();
+        Assert.Null(iconNode.Style.ImageBytes);
+        Assert.Equal("A", iconNode.NodeValue);
+    }
+
+    [Fact]
+    public void UpdateButtons_MinimizedStateChangeAfterSteadyState_UpdatesTooltipAndClass()
+    {
+        var service = new WindowManagerService();
+        var tw = service.RegisterWindow(new DummyWindow("Alpha##a") { IsOpen = true });
+
+        var widget = CreateWidget(service);
+        widget.UpdateButtons();
+        widget.UpdateButtons();
+        var node = widget.WindowNodes["Alpha##a"];
+        Assert.Equal("Left-Click: Focus\nRight-Click: Context Menu", node.Tooltip);
+
+        tw.IsMinimized = true;
+        widget.UpdateButtons();
+        Assert.Equal("Left-Click: Restore\nRight-Click: Context Menu", node.Tooltip);
+        Assert.Contains("minimized", node.ClassList);
+    }
+
+    [Fact]
+    public void UpdateButtons_DockGroupMembersChange_RebuildsChildrenAndTooltip()
+    {
+        var service = new WindowManagerService();
+        var ta = service.RegisterWindow(new DummyWindow("Penumbra##id1") { IsOpen = true });
+        var tb = service.RegisterWindow(new DummyWindow("Glamourer##id2") { IsOpen = true });
+        var tc = service.RegisterWindow(new DummyWindow("SimpleHeals##id3") { IsOpen = true });
+        service.RegisterDockGroup("dock_chg", "Penumbra##id1", new[] { ta, tb });
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+        widget.UpdateButtons();
+        widget.UpdateButtons();
+        var groupNode = widget.WindowNodes["dock_chg"];
+        Assert.Equal("Left-Click: Focus\nRight-Click: Context Menu", groupNode.Tooltip);
+        var twoMemberChildren = groupNode.ChildNodes.Count;
+
+        service.RegisterDockGroup("dock_chg", "Penumbra##id1", new[] { ta, tb, tc });
+        widget.UpdateButtons();
+
+        Assert.True(groupNode.ChildNodes.Count > twoMemberChildren);
+        Assert.Equal(
+            "Docked Plugins:\n- Penumbra\n- Glamourer\n- SimpleHeals\n\nLeft-Click: Focus\nRight-Click: Context Menu",
+            groupNode.Tooltip);
+    }
+
+    [Fact]
+    public void BuildTabTooltip_PlainButtons_ReturnSameInstanceAndUnchangedText()
+    {
+        Assert.Same(
+            WindowManagerWidget.BuildTabTooltip(false, true),
+            WindowManagerWidget.BuildTabTooltip(false, true));
+        Assert.Equal("Left-Click: Restore\nRight-Click: Context Menu", WindowManagerWidget.BuildTabTooltip(true, true));
+        Assert.Equal("Left-Click: Minimize\nRight-Click: Context Menu", WindowManagerWidget.BuildTabTooltip(false, true));
+        Assert.Equal(
+            "Left-Click: Focus\nRight-Click: Context Menu\n\nBest-effort (raw ImGui window)",
+            WindowManagerWidget.BuildTabTooltip(false, false, null, true));
+    }
 }
-
-
-

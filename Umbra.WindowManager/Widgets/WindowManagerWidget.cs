@@ -109,10 +109,29 @@ public class WindowManagerWidget : ToolbarWidget
     private readonly HashSet<string> collapsedGroups = [];
     private readonly HashSet<string> rejectedGroups = [];
     private readonly HashSet<string> renderedGroups = [];
-    private readonly Dictionary<string, string> groupSignatures = [];
+    private readonly Dictionary<string, GroupState> groupStates = [];
     private readonly List<TrackedWindow> memberScratch = [];
 
+    // Per-row dropdown state: the cached label and the row's icon node, so a steady-state tick neither
+    // rebuilds strings nor walks the button's subtree with QuerySelector.
+    private readonly Dictionary<string, DropdownRow> dropdownRows = [];
+
+    // Settings read once at the top of each UpdateButtons pass (the getters hit the config store), then
+    // shared by the per-window helpers below.
+    private bool frameDecorate = true;
+    private bool frameGroupDockedTabs = true;
+    private int frameMaxTitleWidth = 140;
+
+    // Parsed blacklist, re-parsed only when the Blacklist text changes.
+    private static readonly HashSet<string> EmptyBlacklist = new(StringComparer.OrdinalIgnoreCase);
+    private string? parsedBlacklistSource;
+    private HashSet<string> parsedBlacklist = EmptyBlacklist;
+
     private Node? dropdownNode;
+    private Node? dropdownBadgeNode;
+    private int dropdownCount = -1;
+    private string dropdownCountText = "";
+    private string dropdownTooltip = "";
     private MenuPopup? menuPopup;
     private string layout = "";
     private string effectiveMode = "Taskbar";
@@ -389,14 +408,23 @@ public class WindowManagerWidget : ToolbarWidget
         ];
     }
 
+    /// <summary>
+    /// The parsed blacklist. The returned set is shared and cached until the <see cref="Blacklist"/> text
+    /// changes, so callers must not modify it (copy it first, as <see cref="AddToBlacklist"/> does).
+    /// </summary>
     internal HashSet<string> GetParsedBlacklist()
     {
-        if (string.IsNullOrWhiteSpace(this.Blacklist))
-            return [];
+        var text = this.Blacklist;
+        if (string.Equals(text, this.parsedBlacklistSource, StringComparison.Ordinal))
+            return this.parsedBlacklist;
 
-        return this.Blacklist
-            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        this.parsedBlacklistSource = text;
+        this.parsedBlacklist = string.IsNullOrWhiteSpace(text)
+            ? EmptyBlacklist
+            : text
+                .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return this.parsedBlacklist;
     }
 
     internal static bool IsBlacklisted(TrackedWindow window, HashSet<string> blacklist)
@@ -437,12 +465,40 @@ public class WindowManagerWidget : ToolbarWidget
             ? window.CleanTitle
             : window.WindowName;
 
-        var current = this.GetParsedBlacklist();
+        var current = new HashSet<string>(this.GetParsedBlacklist(), StringComparer.OrdinalIgnoreCase);
         if (current.Add(identifier))
         {
             this.Blacklist = string.Join(", ", current);
             this.UpdateButtons();
         }
+    }
+
+    // Order-preserving in-place filters. Plain loops instead of RemoveAll with a lambda, which would
+    // allocate a closure (and a delegate) on every tick.
+    private static void RemoveGameWindows(List<TrackedWindow> buffer)
+    {
+        var keep = 0;
+        for (var i = 0; i < buffer.Count; i++)
+        {
+            var w = buffer[i];
+            if (!string.Equals(w.Namespace, "Game", StringComparison.OrdinalIgnoreCase))
+                buffer[keep++] = w;
+        }
+
+        buffer.RemoveRange(keep, buffer.Count - keep);
+    }
+
+    private static void RemoveBlacklisted(List<TrackedWindow> buffer, HashSet<string> blacklist)
+    {
+        var keep = 0;
+        for (var i = 0; i < buffer.Count; i++)
+        {
+            var w = buffer[i];
+            if (!IsBlacklisted(w, blacklist))
+                buffer[keep++] = w;
+        }
+
+        buffer.RemoveRange(keep, buffer.Count - keep);
     }
 
     internal static void DeduplicateGameWindows(List<TrackedWindow> buffer)
@@ -484,20 +540,22 @@ public class WindowManagerWidget : ToolbarWidget
 
     public void UpdateButtons()
     {
-        this.rootNode.ToggleClass("decorated", this.Decorate);
+        // Each setting getter hits the config store, so read them once per pass.
+        this.frameDecorate = this.Decorate;
+        this.frameGroupDockedTabs = this.GroupDockedTabs;
+        this.frameMaxTitleWidth = this.MaxTitleWidth;
+        var trackGameWindows = this.TrackGameWindows;
+
+        this.rootNode.ToggleClass("decorated", this.frameDecorate);
         this.windowManager.RawTrackingEnabled = this.TrackRawImGui;
         this.windowManager.GetVisibleAndMinimizedWindows(this.windowsBuffer);
 
-        if (!this.TrackGameWindows)
-        {
-            this.windowsBuffer.RemoveAll(w => string.Equals(w.Namespace, "Game", StringComparison.OrdinalIgnoreCase));
-        }
+        if (!trackGameWindows)
+            RemoveGameWindows(this.windowsBuffer);
 
         var blacklistSet = this.GetParsedBlacklist();
         if (blacklistSet.Count > 0)
-        {
-            this.windowsBuffer.RemoveAll(w => IsBlacklisted(w, blacklistSet));
-        }
+            RemoveBlacklisted(this.windowsBuffer, blacklistSet);
 
         DeduplicateGameWindows(this.windowsBuffer);
 
@@ -551,7 +609,7 @@ public class WindowManagerWidget : ToolbarWidget
         for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
             var w = this.windowsBuffer[i];
-            var key = this.GroupDockedTabs ? w.DockGroupKey : null;
+            var key = this.frameGroupDockedTabs ? w.DockGroupKey : null;
 
             if (key != null)
             {
@@ -603,7 +661,7 @@ public class WindowManagerWidget : ToolbarWidget
         if (mode is "Taskbar" or "IconOnly" or "Dropdown") return mode;
 
         // Auto: start as Taskbar and condense under width/count pressure.
-        var estimatedButtonWidth = this.MaxTitleWidth + 34f; // icon + padding + gap.
+        var estimatedButtonWidth = this.frameMaxTitleWidth + 34f; // icon + padding + gap.
         return ResolveAutoMode(count, estimatedButtonWidth, this.GetAvailableWidth());
     }
 
@@ -655,6 +713,7 @@ public class WindowManagerWidget : ToolbarWidget
         {
             mp.Clear(true);
             this.dropdownButtons.Clear();
+            this.dropdownRows.Clear();
         }
 
         this.layout = "buttons";
@@ -674,7 +733,7 @@ public class WindowManagerWidget : ToolbarWidget
             var key = this.toRemove[i];
             if (this.windowNodes.Remove(key, out var node))
                 this.rootNode.RemoveChild(node, true);
-            this.groupSignatures.Remove(key);
+            this.groupStates.Remove(key);
         }
 
         var showLabel = mode == "Taskbar";
@@ -683,7 +742,7 @@ public class WindowManagerWidget : ToolbarWidget
         for (var i = 0; i < this.windowsBuffer.Count; i++)
         {
             var window = this.windowsBuffer[i];
-            var key = this.GroupDockedTabs ? window.DockGroupKey : null;
+            var key = this.frameGroupDockedTabs ? window.DockGroupKey : null;
 
             if (key != null && this.collapsedGroups.Contains(key))
             {
@@ -795,28 +854,33 @@ public class WindowManagerWidget : ToolbarWidget
 
     private void UpdateButtonContent(Node btnNode, TrackedWindow window, bool showLabel)
     {
-        btnNode.ToggleClass("active", window.IsFocused);
-        btnNode.ToggleClass("open", window.IsOpen);
-        btnNode.ToggleClass("minimized", window.IsMinimized);
-        btnNode.ToggleClass("dock-group", this.GroupDockedTabs && window.DockGroupKey != null);
-        btnNode.ToggleClass("decorated", this.Decorate);
+        // IsOpen runs the plugin's own DrawConditions(), so evaluate each live-state flag only once.
+        var isFocused = window.IsFocused;
+        var isOpen = window.IsOpen;
+        var windowMinimized = window.IsMinimized;
+
+        btnNode.ToggleClass("active", isFocused);
+        btnNode.ToggleClass("open", isOpen);
+        btnNode.ToggleClass("minimized", windowMinimized);
+        btnNode.ToggleClass("dock-group", this.frameGroupDockedTabs && window.DockGroupKey != null);
+        btnNode.ToggleClass("decorated", this.frameDecorate);
 
         var title = window.DisplayTitle;
-        btnNode.Style.Opacity = window.IsMinimized ? 0.6f : 1.0f;
+        btnNode.Style.Opacity = windowMinimized ? 0.6f : 1.0f;
 
         DockGroup? dockGroup = null;
         if (window.DockGroupKey != null)
             dockGroup = this.windowManager.GetDockGroup(window.DockGroupKey);
 
-        var isMinimized = window.IsMinimized || !window.IsOpen;
-        btnNode.Tooltip = BuildTabTooltip(isMinimized, window.IsFocused, dockGroup?.Members, window.IsRawImGui);
+        var isMinimized = windowMinimized || !isOpen;
+        btnNode.Tooltip = BuildTabTooltip(isMinimized, isFocused, dockGroup?.Members, window.IsRawImGui);
 
         ApplyIcon(btnNode.ChildNodes[0], window);
 
         var labelNode = btnNode.ChildNodes[1];
         if (!Equals(labelNode.NodeValue, title))
             labelNode.NodeValue = title;
-        labelNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? (float)this.MaxTitleWidth : null;
+        labelNode.Style.MaxWidth = this.frameMaxTitleWidth > 0 ? (float)this.frameMaxTitleWidth : null;
         labelNode.Style.IsVisible = showLabel;
     }
 
@@ -913,7 +977,7 @@ public class WindowManagerWidget : ToolbarWidget
         node.ToggleClass("open", !allMinimized);
         node.ToggleClass("minimized", allMinimized);
         node.ToggleClass("dock-group", true);
-        node.ToggleClass("decorated", this.Decorate);
+        node.ToggleClass("decorated", this.frameDecorate);
         node.Style.Opacity = allMinimized ? 0.6f : 1.0f;
 
         // Titles show only for a pair; a larger group collapses to an icon-only split row.
@@ -921,16 +985,75 @@ public class WindowManagerWidget : ToolbarWidget
 
         // Rebuild the member/divider child nodes only when the visible set, active tab, or label mode
         // changes, so a stable group re-renders without reallocating its subtree (see issue #6).
-        var signature = BuildGroupSignature(members, group.ActiveWindowName, withLabels);
-        if (!this.groupSignatures.TryGetValue(groupKey, out var existing) || existing != signature)
+        if (!this.groupStates.TryGetValue(groupKey, out var state))
         {
-            this.RebuildGroupChildren(node, withLabels);
-            this.groupSignatures[groupKey] = signature;
+            state = new GroupState();
+            this.groupStates[groupKey] = state;
         }
+
+        var rebuilt = state.Update(members, group.ActiveWindowName, withLabels);
+        if (rebuilt)
+            this.RebuildGroupChildren(node, withLabels);
 
         this.RefreshGroupMembers(node, group.ActiveWindowName);
 
-        node.Tooltip = BuildTabTooltip(allMinimized, anyFocused, members);
+        node.Tooltip = state.GetTooltip(allMinimized, anyFocused);
+    }
+
+    /// <summary>
+    /// What a group button was last built from, compared by reference (as
+    /// <c>WindowManagerService.MembersEqual</c> does) so detecting "nothing changed" allocates nothing. It
+    /// also caches the "Docked Plugins" tooltip of groups with three or more members; member titles are
+    /// immutable, so the cache only goes stale when the member list changes.
+    /// </summary>
+    private sealed class GroupState
+    {
+        private readonly List<TrackedWindow> members = [];
+        private readonly string?[] tooltips = new string?[3];
+        private string activeName = "";
+        private bool withLabels;
+        private bool initialized;
+
+        /// <summary>Records the inputs of this render; returns true when they differ from the last one.</summary>
+        public bool Update(List<TrackedWindow> current, string active, bool labels)
+        {
+            if (this.initialized
+                && this.withLabels == labels
+                && string.Equals(this.activeName, active, StringComparison.Ordinal)
+                && SameMembers(this.members, current))
+            {
+                return false;
+            }
+
+            this.members.Clear();
+            this.members.AddRange(current);
+            this.activeName = active;
+            this.withLabels = labels;
+            this.initialized = true;
+            Array.Clear(this.tooltips);
+            return true;
+        }
+
+        public string GetTooltip(bool isMinimized, bool isFocused)
+        {
+            if (this.members.Count < 3)
+                return BuildTabTooltip(isMinimized, isFocused, this.members);
+
+            var index = GetLeftActionIndex(isMinimized, isFocused);
+            return this.tooltips[index] ??= BuildTabTooltip(isMinimized, isFocused, this.members);
+        }
+
+        private static bool SameMembers(List<TrackedWindow> a, List<TrackedWindow> b)
+        {
+            if (a.Count != b.Count) return false;
+
+            for (var i = 0; i < a.Count; i++)
+            {
+                if (!ReferenceEquals(a[i], b[i])) return false;
+            }
+
+            return true;
+        }
     }
 
     private void RebuildGroupChildren(Node node, bool withLabels)
@@ -969,7 +1092,7 @@ public class WindowManagerWidget : ToolbarWidget
                 var title = window.DisplayTitle;
                 if (!Equals(labelNode.NodeValue, title))
                     labelNode.NodeValue = title;
-                labelNode.Style.MaxWidth = this.MaxTitleWidth > 0 ? (float)this.MaxTitleWidth : null;
+                labelNode.Style.MaxWidth = this.frameMaxTitleWidth > 0 ? (float)this.frameMaxTitleWidth : null;
             }
 
             // The active tab reads at full strength; the others recede, so the split still shows which
@@ -1110,19 +1233,31 @@ public class WindowManagerWidget : ToolbarWidget
         return fallback;
     }
 
-    private static string BuildGroupSignature(List<TrackedWindow> members, string activeName, bool withLabels)
+    // The ordinary tooltips (no docked-member list) have only three left-click actions x raw/not-raw, so
+    // they are built once rather than per button per tick.
+    private static readonly string[] LeftActions = ["Restore", "Minimize", "Focus"];
+    private static readonly string[] ActionTooltips = BuildActionTooltips(false);
+    private static readonly string[] RawActionTooltips = BuildActionTooltips(true);
+
+    private static string[] BuildActionTooltips(bool isRawImGui)
     {
-        var names = string.Join(";", members.Select(m => m.WindowName));
-        return $"{(withLabels ? 'L' : 'I')}|{activeName}|{names}";
+        var tooltips = new string[LeftActions.Length];
+        for (var i = 0; i < tooltips.Length; i++)
+        {
+            tooltips[i] = $"Left-Click: {LeftActions[i]}\nRight-Click: Context Menu";
+            if (isRawImGui)
+                tooltips[i] += "\n\nBest-effort (raw ImGui window)";
+        }
+
+        return tooltips;
     }
+
+    private static int GetLeftActionIndex(bool isMinimized, bool isFocused) =>
+        isMinimized ? 0 : (isFocused ? 1 : 2);
 
     internal static string BuildTabTooltip(bool isMinimized, bool isFocused, IReadOnlyList<TrackedWindow>? dockedMembers = null, bool isRawImGui = false)
     {
-        var leftAction = isMinimized ? "Restore" : (isFocused ? "Minimize" : "Focus");
-        var actions = $"Left-Click: {leftAction}\nRight-Click: Context Menu";
-
-        if (isRawImGui)
-            actions += "\n\nBest-effort (raw ImGui window)";
+        var actions = (isRawImGui ? RawActionTooltips : ActionTooltips)[GetLeftActionIndex(isMinimized, isFocused)];
 
         if (dockedMembers is { Count: >= 3 })
         {
@@ -1147,23 +1282,14 @@ public class WindowManagerWidget : ToolbarWidget
             if (iconNode.Style.ImageBytes != null)
                 iconNode.Style.ImageBytes = null;
 
-            var monogram = GetMonogram(window.DisplayTitle);
+            var monogram = window.Monogram;
             if (!Equals(iconNode.NodeValue, monogram))
                 iconNode.NodeValue = monogram;
         }
     }
 
     /// <summary>First non-whitespace character of the title, upper-cased; a stable icon fallback.</summary>
-    internal static string GetMonogram(string cleanTitle)
-    {
-        foreach (var ch in cleanTitle)
-        {
-            if (!char.IsWhiteSpace(ch))
-                return char.ToUpperInvariant(ch).ToString();
-        }
-
-        return "?";
-    }
+    internal static string GetMonogram(string cleanTitle) => TrackedWindow.ComputeMonogram(cleanTitle);
 
     // --- Dropdown layout ----------------------------------------------------------------------------
 
@@ -1174,6 +1300,7 @@ public class WindowManagerWidget : ToolbarWidget
         foreach (var node in this.windowNodes.Values)
             this.rootNode.RemoveChild(node, true);
         this.windowNodes.Clear();
+        this.groupStates.Clear();
 
         this.dropdownNode ??= CreateDropdownNode();
         if (this.dropdownNode.ParentNode != this.rootNode)
@@ -1268,13 +1395,22 @@ public class WindowManagerWidget : ToolbarWidget
                 var name = this.toRemove[i];
                 if (this.dropdownButtons.Remove(name, out var btn))
                     popup.Remove(btn, true);
+                this.dropdownRows.Remove(name);
             }
 
             for (var i = 0; i < this.windowsBuffer.Count; i++)
             {
                 var window = this.windowsBuffer[i];
                 var windowName = window.WindowName;
-                var label = $"{window.DisplayTitle}{(window.IsMinimized ? " [Minimized]" : "")}";
+                var isMinimized = window.IsMinimized;
+
+                if (!this.dropdownRows.TryGetValue(windowName, out var row))
+                {
+                    row = new DropdownRow();
+                    this.dropdownRows[windowName] = row;
+                }
+
+                var label = row.GetLabel(window, isMinimized);
 
                 if (!this.dropdownButtons.TryGetValue(windowName, out var btn))
                 {
@@ -1298,7 +1434,8 @@ public class WindowManagerWidget : ToolbarWidget
 
                 if (window.IconBytes != null)
                 {
-                    var iconNode = btn.Node.QuerySelector(".icon");
+                    row.IconNode ??= btn.Node.QuerySelector(".icon");
+                    var iconNode = row.IconNode;
                     if (iconNode != null)
                     {
                         if (!ReferenceEquals(iconNode.Style.ImageBytes, window.IconBytes))
@@ -1317,12 +1454,45 @@ public class WindowManagerWidget : ToolbarWidget
 
         if (this.dropdownNode is { } dn)
         {
-            var countStr = this.windowsBuffer.Count.ToString();
-            var badgeNode = dn.ChildNodes.FirstOrDefault(c => c.Id == "badge") ?? dn.ChildNodes[1];
-            if (!Equals(badgeNode.NodeValue, countStr))
-                badgeNode.NodeValue = countStr;
-            dn.Tooltip = this.windowsBuffer.Count == 1 ? "1 open window" : $"{this.windowsBuffer.Count} open windows";
-            dn.ToggleClass("decorated", this.Decorate);
+            var count = this.windowsBuffer.Count;
+            if (count != this.dropdownCount)
+            {
+                this.dropdownCount = count;
+                this.dropdownCountText = count.ToString();
+                this.dropdownTooltip = count == 1 ? "1 open window" : $"{count} open windows";
+            }
+
+            var badgeNode = this.dropdownBadgeNode ??= dn.ChildNodes.FirstOrDefault(c => c.Id == "badge") ?? dn.ChildNodes[1];
+            if (!Equals(badgeNode.NodeValue, this.dropdownCountText))
+                badgeNode.NodeValue = this.dropdownCountText;
+            dn.Tooltip = this.dropdownTooltip;
+            dn.ToggleClass("decorated", this.frameDecorate);
+        }
+    }
+
+    /// <summary>
+    /// Per-window dropdown row state: the label is rebuilt only when the tracked window instance or its
+    /// minimized flag changes (the title itself never changes for an instance), and the row's icon node is
+    /// looked up once instead of walking the button subtree every tick.
+    /// </summary>
+    private sealed class DropdownRow
+    {
+        private TrackedWindow? window;
+        private bool minimized;
+        private string label = "";
+
+        public Node? IconNode;
+
+        public string GetLabel(TrackedWindow current, bool isMinimized)
+        {
+            if (!ReferenceEquals(this.window, current) || this.minimized != isMinimized)
+            {
+                this.window = current;
+                this.minimized = isMinimized;
+                this.label = $"{current.DisplayTitle}{(isMinimized ? " [Minimized]" : "")}";
+            }
+
+            return this.label;
         }
     }
 
