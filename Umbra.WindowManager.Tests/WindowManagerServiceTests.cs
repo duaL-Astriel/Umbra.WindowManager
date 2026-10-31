@@ -277,6 +277,27 @@ public class WindowManagerServiceTests
     }
 
     [Fact]
+    public void RegisterDockGroup_UnchangedGroup_ReassertsClearedMemberKey()
+    {
+        var service = new WindowManagerService();
+        var tw1 = service.RegisterWindow(new DummyWindow("Tab 1") { IsOpen = true });
+        var tw2 = service.RegisterWindow(new DummyWindow("Tab 2") { IsOpen = true });
+        var members = new[] { tw1, tw2 };
+
+        service.RegisterDockGroup("dock_reassert", "Tab 1", members);
+        var group = service.GetDockGroup("dock_reassert");
+
+        // The monitor clears the key on a frame where the window isn't reported as docked (e.g. the
+        // first frame after a restore), then re-registers the same group once it is docked again.
+        tw2.DockGroupKey = null;
+        service.RegisterDockGroup("dock_reassert", "Tab 1", members);
+
+        Assert.Same(group, service.GetDockGroup("dock_reassert"));
+        Assert.Equal("dock_reassert", tw1.DockGroupKey);
+        Assert.Equal("dock_reassert", tw2.DockGroupKey);
+    }
+
+    [Fact]
     public void WindowManagerService_DockGroup_RemoveDockGroup_RestoresIndividualBehavior()
     {
         var service = new WindowManagerService();
