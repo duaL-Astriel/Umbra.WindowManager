@@ -139,6 +139,20 @@ public class ImGuiContextMonitorValidationTests
     {
         Assert.Equal(expected, ImGuiContextMonitor.IsWindowActive(active, wasActive));
     }
+    [Theory]
+    // Open and not minimized -> its dock state this frame is authoritative.
+    [InlineData(false, true, true)]
+    // Minimized by us: a WasActive-only frame right after the minimize still reports the old dock id.
+    [InlineData(true, false, false)]
+    // Closed by the user (own IsOpen false) but drawn last frame -> stale too.
+    [InlineData(false, false, false)]
+    // Minimized while its plugin still reports open (reopen not yet reconciled) -> leave the group alone.
+    [InlineData(true, true, false)]
+    public void ShouldUpdateDockMembership_IgnoresHiddenWindows(bool isMinimized, bool isUnderlyingOpen, bool expected)
+    {
+        Assert.Equal(expected, ImGuiContextMonitor.ShouldUpdateDockMembership(isMinimized, isUnderlyingOpen));
+    }
+
     [Fact]
     public void WithWindowMenuButtonUnsuppressed_WhenNone_RemainsNone()
     {
