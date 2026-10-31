@@ -17,6 +17,11 @@ public class WindowManagerService
 
     // Environment.TickCount64 instead of DateTime.UtcNow: RegisterWindow is on a 250 ms hot path (issue #65).
     private long lastPruneTick = long.MinValue / 2;
+    private readonly WindowFrameClock frameClock = new();
+    private WindowSnapshot snapshot = new(-1, []);
+    private int windowSetGeneration;
+
+    private sealed record WindowSnapshot(int Generation, KeyValuePair<string, TrackedWindow>[] Entries);
 
     /// <summary>
     /// Whether raw-ImGui window tracking is enabled. Written by the widget (which owns the user-facing
@@ -31,7 +36,7 @@ public class WindowManagerService
     {
         get
         {
-            foreach (var (_, w) in this.windows)
+            foreach (var (_, w) in this.GetWindowSnapshot())
             {
                 if (w.IsAlive && w.IsManageable && w.IsOpen && !w.IsMinimized && !string.IsNullOrWhiteSpace(w.CleanTitle))
                     return true;
@@ -43,23 +48,41 @@ public class WindowManagerService
 
     public bool CanRestoreBulkMinimized => this.lastBulkMinimizedKeys.Count > 0 && !this.AreAnyWindowsOpen;
 
+    /// <summary>
+    /// Reads <see cref="AreAnyWindowsOpen"/> and <see cref="CanRestoreBulkMinimized"/> together, scanning the
+    /// windows once. Callers that need both (the Minimize All widget) would otherwise scan twice (issue #64).
+    /// </summary>
+    public void GetBulkMinimizeState(out bool anyWindowsOpen, out bool canRestoreBulkMinimized)
+    {
+        anyWindowsOpen = this.AreAnyWindowsOpen;
+        canRestoreBulkMinimized = this.lastBulkMinimizedKeys.Count > 0 && !anyWindowsOpen;
+    }
+
+    /// <summary>
+    /// Marks the start of a draw frame. Per-window state (<see cref="TrackedWindow.IsOpen"/> and friends) is
+    /// cached until the next call, so each window's plugin <c>DrawConditions()</c> runs at most once per frame.
+    /// Called by <see cref="ImGuiContextMonitor"/> at the top of its draw hook.
+    /// </summary>
+    internal void BeginFrame() => this.frameClock.Advance();
+
     public void GetTrackedWindows(List<TrackedWindow> destination)
     {
         destination.Clear();
-        foreach (var (key, w) in this.windows)
+        foreach (var entry in this.GetWindowSnapshot())
         {
-            if (w.IsAlive)
-                destination.Add(w);
+            if (entry.Value.IsAlive)
+                destination.Add(entry.Value);
             else
-                this.windows.TryRemove(key, out _);
+                this.TryRemoveEntry(entry);
         }
     }
 
     public void GetVisibleAndMinimizedWindows(List<TrackedWindow> destination)
     {
         destination.Clear();
-        foreach (var (key, w) in this.windows)
+        foreach (var entry in this.GetWindowSnapshot())
         {
+            var w = entry.Value;
             if (w.IsAlive)
             {
                 if (!w.IsManageable)
@@ -71,7 +94,7 @@ public class WindowManagerService
             }
             else
             {
-                this.windows.TryRemove(key, out _);
+                this.TryRemoveEntry(entry);
             }
         }
     }
@@ -95,11 +118,63 @@ public class WindowManagerService
 
     public void PruneDeadWindows()
     {
-        foreach (var (key, tw) in this.windows)
+        foreach (var entry in this.GetWindowSnapshot())
         {
-            if (!tw.IsAlive)
-                this.windows.TryRemove(key, out _);
+            if (!entry.Value.IsAlive)
+                this.TryRemoveEntry(entry);
         }
+    }
+
+    /// <summary>
+    /// Bumped on every change to the set of tracked windows: an addition, a replacement, or any removal.
+    /// Unlike <see cref="WindowRegistrationGeneration"/> (additions only), this is what invalidates the
+    /// window snapshot, so the draw loop and widgets iterate a plain array instead of the
+    /// <see cref="ConcurrentDictionary{TKey,TValue}"/> and the array is rebuilt only when this moves (issue #64).
+    /// </summary>
+    internal int WindowSetGeneration => Volatile.Read(ref this.windowSetGeneration);
+
+    /// <summary>
+    /// The current windows as an immutable array, rebuilt only when <see cref="WindowSetGeneration"/> has
+    /// changed. May include dead windows until a caller prunes them; check <see cref="TrackedWindow.IsAlive"/>.
+    /// </summary>
+    private KeyValuePair<string, TrackedWindow>[] GetWindowSnapshot()
+    {
+        var current = Volatile.Read(ref this.snapshot);
+        var generation = this.WindowSetGeneration;
+        if (current.Generation != generation)
+        {
+            current = new WindowSnapshot(generation, this.windows.ToArray());
+            Volatile.Write(ref this.snapshot, current);
+        }
+
+        return current.Entries;
+    }
+
+    private TrackedWindow Adopt(TrackedWindow tracked)
+    {
+        tracked.FrameClock = this.frameClock;
+        Interlocked.Increment(ref this.windowSetGeneration);
+        return tracked;
+    }
+
+    // Removes only if the key still maps to this exact instance, so a window re-registered under the same
+    // name since the snapshot was taken is left alone.
+    private bool TryRemoveEntry(KeyValuePair<string, TrackedWindow> entry)
+    {
+        if (!this.windows.TryRemove(entry))
+            return false;
+
+        Interlocked.Increment(ref this.windowSetGeneration);
+        return true;
+    }
+
+    private bool TryRemoveKey(string key)
+    {
+        if (!this.windows.TryRemove(key, out _))
+            return false;
+
+        Interlocked.Increment(ref this.windowSetGeneration);
+        return true;
     }
 
     private int windowRegistrationGeneration;
@@ -138,7 +213,7 @@ public class WindowManagerService
             static (_, arg) =>
             {
                 Interlocked.Increment(ref arg.Service.windowRegistrationGeneration);
-                return new TrackedWindow(arg.Window);
+                return arg.Service.Adopt(new TrackedWindow(arg.Window));
             },
             static (_, existing, arg) =>
             {
@@ -146,7 +221,7 @@ public class WindowManagerService
                     return existing;
 
                 Interlocked.Increment(ref arg.Service.windowRegistrationGeneration);
-                return new TrackedWindow(arg.Window);
+                return arg.Service.Adopt(new TrackedWindow(arg.Window));
             },
             (Service: this, Window: window));
     }
@@ -163,13 +238,14 @@ public class WindowManagerService
 
         return this.windows.AddOrUpdate(
             windowName,
-            static (name) => new ImGuiTrackedWindow(name),
-            static (name, existing) => existing is ImGuiTrackedWindow ? existing : new ImGuiTrackedWindow(name));
+            static (name, service) => service.Adopt(new ImGuiTrackedWindow(name)),
+            static (name, existing, service) => existing is ImGuiTrackedWindow ? existing : service.Adopt(new ImGuiTrackedWindow(name)),
+            this);
     }
 
     public void UnregisterWindow(IWindow window)
     {
-        this.windows.TryRemove(window.WindowName, out _);
+        this.TryRemoveKey(window.WindowName);
     }
 
     public void UnregisterWindowsForPlugin(string pluginInternalName)
@@ -185,7 +261,7 @@ public class WindowManagerService
                 if (tw.DockGroupKey != null)
                     affectedDockKeys.Add(tw.DockGroupKey);
 
-                this.windows.TryRemove(key, out _);
+                this.TryRemoveKey(key);
             }
         }
 
