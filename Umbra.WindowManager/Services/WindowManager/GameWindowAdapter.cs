@@ -36,20 +36,11 @@ public class GameWindowAdapter : IWindow
     private readonly List<SavedUnitState> savedChildUnits = [];
     internal int SavedChildUnitCount => this.savedChildUnits.Count;
 
-    internal static void DiagLog(string message)
-    {
-        try
-        {
-            var logPath = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "XIVLauncher", "wm-game-diag.log");
-            System.IO.File.AppendAllText(logPath, $"{DateTime.Now:HH:mm:ss.fff} {message}\n");
-        }
-        catch
-        {
-            // Best effort
-        }
-    }
+    /// <summary>
+    /// Opt-in diagnostic logging (see <see cref="DiagLogWriter"/>). Off by default: the interpolated message is
+    /// neither built nor written unless enabled, and writes never happen on the calling thread.
+    /// </summary>
+    internal static void DiagLog(DiagLogHandler message) => message.Write();
 
     /// <summary>
     /// Determines whether an addon is an embedded child tab inside a parent container
