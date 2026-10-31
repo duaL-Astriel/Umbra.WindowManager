@@ -1,3 +1,5 @@
+using System;
+using System.Linq;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 using Umbra.WindowManager.Services.WindowManager;
 using Xunit;
@@ -97,5 +99,65 @@ public class MainCommandRegistryTests
             Assert.True(entry.MainCommandId > 0);
             Assert.True(entry.IconId > 0);
         }
+    }
+
+    [Theory]
+    [InlineData("Character", "Character")]
+    [InlineData("character", "Character")]
+    [InlineData("InventoryGrid", "Inventory")]
+    [InlineData("PlayerSearch", "Search")]
+    public void TryGetByUtf8AddonName_NulPaddedBuffer_MatchesLikeStringLookup(string name, string expectedAddon)
+    {
+        var buffer = new byte[32];
+        System.Text.Encoding.UTF8.GetBytes(name, buffer);
+
+        Assert.True(MainCommandRegistry.TryGetByUtf8AddonName(buffer, out var entry));
+        Assert.Equal(expectedAddon, entry.AddonName);
+        Assert.True(MainCommandRegistry.TryGetByAddonName(name, out var viaString));
+        Assert.Same(viaString, entry);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("_NaviMap")]
+    [InlineData("Characters")]
+    [InlineData("Charact")]
+    public void TryGetByUtf8AddonName_UnknownOrEmpty_ReturnsFalse(string name)
+    {
+        var buffer = new byte[32];
+        System.Text.Encoding.UTF8.GetBytes(name, buffer);
+
+        Assert.False(MainCommandRegistry.TryGetByUtf8AddonName(buffer, out var entry));
+        Assert.Null(entry);
+    }
+
+    [Fact]
+    public void TryGetByUtf8AddonName_OverlongBuffer_ReturnsFalse()
+    {
+        Assert.False(MainCommandRegistry.TryGetByUtf8AddonName(new byte[200].Select(_ => (byte)'a').ToArray(), out _));
+    }
+
+    [Fact]
+    public void TryGetByUtf8AddonName_DoesNotAllocate()
+    {
+        var buffer = new byte[32];
+        System.Text.Encoding.UTF8.GetBytes("Inventory", buffer);
+        var miss = new byte[32];
+        System.Text.Encoding.UTF8.GetBytes("_NaviMap", miss);
+
+        for (var i = 0; i < 10; i++)
+        {
+            MainCommandRegistry.TryGetByUtf8AddonName(buffer, out _);
+            MainCommandRegistry.TryGetByUtf8AddonName(miss, out _);
+        }
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 1000; i++)
+        {
+            MainCommandRegistry.TryGetByUtf8AddonName(buffer, out _);
+            MainCommandRegistry.TryGetByUtf8AddonName(miss, out _);
+        }
+
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
     }
 }

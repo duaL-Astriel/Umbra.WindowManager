@@ -13,7 +13,10 @@ public class WindowManagerService
     private readonly ConcurrentDictionary<string, TrackedWindow> windows = new();
     private readonly ConcurrentDictionary<string, DockGroup> dockGroups = new();
     private readonly HashSet<string> lastBulkMinimizedKeys = [];
-    private DateTime lastPruneTime = DateTime.MinValue;
+    private const long PruneIntervalMs = 5000;
+
+    // Environment.TickCount64 instead of DateTime.UtcNow: RegisterWindow is on a 250 ms hot path (issue #65).
+    private long lastPruneTick = long.MinValue / 2;
     private readonly WindowFrameClock frameClock = new();
     private WindowSnapshot snapshot = new(-1, []);
     private int windowSetGeneration;
@@ -187,28 +190,40 @@ public class WindowManagerService
 
     public TrackedWindow RegisterWindow(IWindow window)
     {
-        var now = DateTime.UtcNow;
-        if (now - this.lastPruneTime > TimeSpan.FromSeconds(5))
+        var now = Environment.TickCount64;
+        if (now - this.lastPruneTick >= PruneIntervalMs)
         {
-            this.lastPruneTime = now;
+            this.lastPruneTick = now;
             this.PruneDeadWindows();
         }
 
+        var name = window.WindowName;
+
+        // Hot path (every window of every known WindowSystem, 4x/s): almost always the entry already wraps
+        // this exact instance, so answer without touching AddOrUpdate or allocating (issue #65).
+        if (this.windows.TryGetValue(name, out var current) &&
+            current.TryGetWindow(out var currentWindow) &&
+            ReferenceEquals(currentWindow, window))
+        {
+            return current;
+        }
+
         return this.windows.AddOrUpdate(
-            window.WindowName,
-            _ =>
+            name,
+            static (_, arg) =>
             {
-                Interlocked.Increment(ref this.windowRegistrationGeneration);
-                return this.Adopt(new TrackedWindow(window));
+                Interlocked.Increment(ref arg.Service.windowRegistrationGeneration);
+                return arg.Service.Adopt(new TrackedWindow(arg.Window));
             },
-            (_, existing) =>
+            static (_, existing, arg) =>
             {
-                if (existing.TryGetWindow(out var alive) && ReferenceEquals(alive, window))
+                if (existing.TryGetWindow(out var alive) && ReferenceEquals(alive, arg.Window))
                     return existing;
 
-                Interlocked.Increment(ref this.windowRegistrationGeneration);
-                return this.Adopt(new TrackedWindow(window));
-            });
+                Interlocked.Increment(ref arg.Service.windowRegistrationGeneration);
+                return arg.Service.Adopt(new TrackedWindow(arg.Window));
+            },
+            (Service: this, Window: window));
     }
 
     /// <summary>
@@ -218,10 +233,14 @@ public class WindowManagerService
     /// </summary>
     public TrackedWindow RegisterImGuiWindow(string windowName)
     {
+        if (this.windows.TryGetValue(windowName, out var current) && current is ImGuiTrackedWindow)
+            return current;
+
         return this.windows.AddOrUpdate(
             windowName,
-            _ => this.Adopt(new ImGuiTrackedWindow(windowName)),
-            (_, existing) => existing is ImGuiTrackedWindow ? existing : this.Adopt(new ImGuiTrackedWindow(windowName)));
+            static (name, service) => service.Adopt(new ImGuiTrackedWindow(name)),
+            static (name, existing, service) => existing is ImGuiTrackedWindow ? existing : service.Adopt(new ImGuiTrackedWindow(name)),
+            this);
     }
 
     public void UnregisterWindow(IWindow window)
