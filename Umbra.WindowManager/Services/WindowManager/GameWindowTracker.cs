@@ -110,19 +110,16 @@ public class GameWindowTracker : IDisposable
 
     private void OnAddonLifecycleEvent(AddonEvent type, AddonArgs args)
     {
-        GameWindowAdapter.DiagLog($"[AddonLifecycle] {type}: {args.AddonName} addr=0x{args.Addon.Address:X}");
         this.HandleAddonEvent(args.AddonName, args.Addon.Address, isSetupOrShow: true);
     }
 
     private void OnAddonCloseEvent(AddonEvent type, AddonArgs args)
     {
-        GameWindowAdapter.DiagLog($"[AddonLifecycle] {type}: {args.AddonName} addr=0x{args.Addon.Address:X}");
         this.HandleAddonClose(args.AddonName);
     }
 
     private void OnAddonHideEvent(AddonEvent type, AddonArgs args)
     {
-        GameWindowAdapter.DiagLog($"[AddonLifecycle] {type}: {args.AddonName} addr=0x{args.Addon.Address:X}");
         this.HandleAddonHide(args.AddonName);
     }
 
@@ -148,10 +145,9 @@ public class GameWindowTracker : IDisposable
         if (string.IsNullOrWhiteSpace(addonName))
             return false;
 
-        GameWindowAdapter.DiagLog($"[HandleAddonEvent] addonName={addonName} addr=0x{address:X} isSetupOrShow={isSetupOrShow}");
-
         if (MainCommandRegistry.TryGetByAddonName(addonName, out var entry))
         {
+            GameWindowAdapter.DiagLog($"[HandleAddonEvent] addonName={addonName} addr=0x{address:X} isSetupOrShow={isSetupOrShow}");
             if (isSetupOrShow)
             {
                 var effectiveAddress = address;
