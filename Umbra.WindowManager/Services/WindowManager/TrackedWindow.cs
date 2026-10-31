@@ -38,6 +38,27 @@ public class TrackedWindow
     public string DisplayTitle => !string.IsNullOrWhiteSpace(this.CleanTitle)
         ? this.CleanTitle
         : (!string.IsNullOrWhiteSpace(this.Id) ? this.Id : this.WindowName);
+
+    private string? monogram;
+
+    /// <summary>
+    /// First non-whitespace character of <see cref="DisplayTitle"/>, upper-cased ("?" if there is none).
+    /// <see cref="DisplayTitle"/> is derived from init-only values, so this is computed once on first use
+    /// and the widget's per-tick icon fallback no longer allocates a string.
+    /// </summary>
+    public string Monogram => this.monogram ??= ComputeMonogram(this.DisplayTitle);
+
+    internal static string ComputeMonogram(string title)
+    {
+        foreach (var ch in title)
+        {
+            if (!char.IsWhiteSpace(ch))
+                return char.ToUpperInvariant(ch).ToString();
+        }
+
+        return "?";
+    }
+
     public string Namespace { get; set; }
     public bool IsMinimized { get; set; }
     public string? DockGroupKey { get; set; }
