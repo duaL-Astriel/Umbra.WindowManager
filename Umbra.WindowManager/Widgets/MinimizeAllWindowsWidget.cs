@@ -267,8 +267,8 @@ public class MinimizeAllWindowsWidget : ToolbarWidget
     {
         this.buttonNode.ToggleClass("decorated", this.Decorate);
 
-        var canRestore = this.Toggle && this.windowManager.CanRestoreBulkMinimized;
-        var anyOpen = this.windowManager.AreAnyWindowsOpen;
+        this.windowManager.GetBulkMinimizeState(out var anyOpen, out var canRestoreBulk);
+        var canRestore = this.Toggle && canRestoreBulk;
 
         var isVisible = !this.AutoHide || anyOpen || canRestore;
         this.buttonNode.Style.IsVisible = isVisible;

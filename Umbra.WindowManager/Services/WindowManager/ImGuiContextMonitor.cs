@@ -207,6 +207,11 @@ public class ImGuiContextMonitor
     [OnDraw(executionOrder: 10)]
     public unsafe void OnDraw()
     {
+        // Advance first, even when there is no ImGui context to inspect: this is what makes the per-frame window
+        // state cache (TrackedWindow.IsOpen and friends) expire, and it must keep ticking so reads in widgets
+        // never see a previous frame's value (issue #64).
+        this.windowManager.BeginFrame();
+
         var ctx = ImGui.GetCurrentContext();
         if (ctx.IsNull) return;
 

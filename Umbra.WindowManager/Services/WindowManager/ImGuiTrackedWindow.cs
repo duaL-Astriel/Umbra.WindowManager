@@ -40,30 +40,31 @@ public sealed class ImGuiTrackedWindow : TrackedWindow
 
     public override bool IsRawImGui => true;
 
-    public override bool IsAlive => this.UnseenFrames <= MaxUnseenRawFrames;
+    // State is observed fields the monitor rewrites mid-frame; never frame-cached.
+    protected override bool IsStateCacheable => false;
 
-    public override bool IsFocused => this.ObservedFocused;
+    protected override bool EvaluateIsAlive() => this.UnseenFrames <= MaxUnseenRawFrames;
+
+    protected override bool EvaluateIsFocused() => this.ObservedFocused;
 
     // Raw windows have no IWindow.DrawConditions.
     public override bool PassesDrawConditions => true;
 
     // "Open" for a raw window means it is currently drawing and not soft-hidden. The setter is a no-op:
     // we cannot flip a foreign plugin's own visibility flag; lifecycle is driven by observed frames (issue #38).
-    public override bool IsOpen
+    protected override bool EvaluateIsOpen() => !this.IsMinimized && this.HasConfirmedUi;
+
+    protected override void WriteIsOpen(bool value)
     {
-        get => !this.IsMinimized && this.HasConfirmedUi;
-        set { /* raw windows own their own draw loop; lifecycle is driven by observed frames */ }
+        /* raw windows own their own draw loop; lifecycle is driven by observed frames */
     }
 
-    public override bool IsManageable
+    protected override bool EvaluateIsManageable()
     {
-        get
-        {
-            if (this.UnseenFrames > 5) return false;
-            if (!this.IsMinimized && !this.HasConfirmedUi) return false;
-            if (this.ObservedSize.X <= 0 || this.ObservedSize.Y <= 0) return false;
-            return this.HasTitleBar;
-        }
+        if (this.UnseenFrames > 5) return false;
+        if (!this.IsMinimized && !this.HasConfirmedUi) return false;
+        if (this.ObservedSize.X <= 0 || this.ObservedSize.Y <= 0) return false;
+        return this.HasTitleBar;
     }
 
     public override void BringToFront() => this.PendingFocus = true;

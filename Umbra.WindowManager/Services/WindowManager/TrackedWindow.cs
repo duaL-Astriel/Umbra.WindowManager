@@ -8,6 +8,18 @@ public class TrackedWindow
 {
     private readonly WeakReference<IWindow> windowRef;
 
+    // Per-frame state cache (issue #64). Each *Frame field holds the WindowFrameClock frame its value was
+    // computed on; 0 means "not cached". See InvalidateStateCache for what resets them.
+    private int aliveFrame;
+    private int openFrame;
+    private int focusedFrame;
+    private int manageableFrame;
+    private bool aliveValue;
+    private bool openValue;
+    private bool focusedValue;
+    private bool manageableValue;
+    private bool hasConfirmedUi = true;
+
     public TrackedWindow(IWindow window)
     {
         this.windowRef = new WeakReference<IWindow>(window);
@@ -32,6 +44,33 @@ public class TrackedWindow
         this.Namespace = string.Empty;
     }
 
+    /// <summary>Frame clock assigned by the owning <see cref="WindowManagerService"/>; <c>null</c> disables caching.</summary>
+    internal WindowFrameClock? FrameClock { get; set; }
+
+    /// <summary>
+    /// Whether the state getters may be cached for a frame. Raw-ImGui windows opt out: their state is plain
+    /// fields the monitor rewrites mid-frame, so there is nothing expensive to save and caching would only
+    /// add staleness.
+    /// </summary>
+    protected virtual bool IsStateCacheable => true;
+
+    /// <summary>The frame to stamp cached state with, or 0 when this read must not be cached.</summary>
+    private int CacheFrame => this.IsStateCacheable ? this.FrameClock?.ActiveFrame ?? 0 : 0;
+
+    /// <summary>
+    /// Drops every cached value so the next read goes back to the window. Called by everything that writes
+    /// state the getters depend on: the <see cref="IsOpen"/> setter, <see cref="IsMinimized"/>, and
+    /// <see cref="BringToFront"/> (which changes focus). That makes a minimize or restore visible to the
+    /// same frame's later reads.
+    /// </summary>
+    internal void InvalidateStateCache()
+    {
+        this.aliveFrame = 0;
+        this.openFrame = 0;
+        this.focusedFrame = 0;
+        this.manageableFrame = 0;
+    }
+
     public string WindowName { get; }
     public string CleanTitle { get; }
     public string Id { get; }
@@ -39,7 +78,20 @@ public class TrackedWindow
         ? this.CleanTitle
         : (!string.IsNullOrWhiteSpace(this.Id) ? this.Id : this.WindowName);
     public string Namespace { get; set; }
-    public bool IsMinimized { get; set; }
+
+    private bool isMinimized;
+
+    public bool IsMinimized
+    {
+        get => this.isMinimized;
+        set
+        {
+            if (this.isMinimized == value) return;
+            this.isMinimized = value;
+            this.InvalidateStateCache();
+        }
+    }
+
     public string? DockGroupKey { get; set; }
 
     /// <summary>
@@ -64,7 +116,23 @@ public class TrackedWindow
     /// windows this is "the weak reference is still alive"; raw-ImGui windows override it with an
     /// unseen-frame threshold (they have no reference to keep alive). Callers prune on this signal.
     /// </summary>
-    public virtual bool IsAlive => this.TryGetWindow(out _);
+    public bool IsAlive
+    {
+        get
+        {
+            var frame = this.CacheFrame;
+            if (frame == 0) return this.EvaluateIsAlive();
+            if (this.aliveFrame != frame)
+            {
+                this.aliveValue = this.EvaluateIsAlive();
+                this.aliveFrame = frame;
+            }
+
+            return this.aliveValue;
+        }
+    }
+
+    protected virtual bool EvaluateIsAlive() => this.TryGetWindow(out _);
 
     /// <summary>Whether this is a raw-ImGui window (no <see cref="IWindow"/>). Used for best-effort UI copy.</summary>
     public virtual bool IsRawImGui => false;
@@ -89,14 +157,39 @@ public class TrackedWindow
         }
     }
 
-    public virtual bool IsOpen
+    /// <summary>
+    /// Whether the window is open and passes its draw conditions. The getter is cached for the current frame
+    /// (see <see cref="WindowFrameClock"/>) so the owning plugin's <see cref="IWindow.DrawConditions"/> runs at
+    /// most once per frame however many callers ask; the setter invalidates the cache so a minimize or
+    /// restore is visible to the very next read.
+    /// </summary>
+    public bool IsOpen
     {
-        get => this.TryGetWindow(out var w) && w.IsOpen && this.PassesDrawConditions;
+        get
+        {
+            var frame = this.CacheFrame;
+            if (frame == 0) return this.EvaluateIsOpen();
+            if (this.openFrame != frame)
+            {
+                this.openValue = this.EvaluateIsOpen();
+                this.openFrame = frame;
+            }
+
+            return this.openValue;
+        }
         set
         {
-            if (this.TryGetWindow(out var w))
-                w.IsOpen = value;
+            this.WriteIsOpen(value);
+            this.InvalidateStateCache();
         }
+    }
+
+    protected virtual bool EvaluateIsOpen() => this.TryGetWindow(out var w) && w.IsOpen && this.PassesDrawConditions;
+
+    protected virtual void WriteIsOpen(bool value)
+    {
+        if (this.TryGetWindow(out var w))
+            w.IsOpen = value;
     }
 
     /// <summary>
@@ -105,13 +198,38 @@ public class TrackedWindow
     /// </summary>
     public bool IsUnderlyingOpen => this.TryGetWindow(out var w) && w.IsOpen;
 
-    public virtual bool IsFocused => this.TryGetWindow(out var w) && w.IsFocused;
+    public bool IsFocused
+    {
+        get
+        {
+            var frame = this.CacheFrame;
+            if (frame == 0) return this.EvaluateIsFocused();
+            if (this.focusedFrame != frame)
+            {
+                this.focusedValue = this.EvaluateIsFocused();
+                this.focusedFrame = frame;
+            }
+
+            return this.focusedValue;
+        }
+    }
+
+    protected virtual bool EvaluateIsFocused() => this.TryGetWindow(out var w) && w.IsFocused;
 
     /// <summary>
     /// Whether the window is confirmed to be rendered in the active ImGui context with positive dimensions
     /// and visual content. Defaults to true until ImGui context monitoring evaluates it.
     /// </summary>
-    public bool HasConfirmedUi { get; set; } = true;
+    public bool HasConfirmedUi
+    {
+        get => this.hasConfirmedUi;
+        set
+        {
+            if (this.hasConfirmedUi == value) return;
+            this.hasConfirmedUi = value;
+            this.manageableFrame = 0;   // IsManageable reads this; nothing else cached does
+        }
+    }
 
     /// <summary>
     /// Consecutive frames where this window was open but not observed in the active ImGui context.
@@ -122,29 +240,42 @@ public class TrackedWindow
     /// Whether the window is an interactive, titled user-facing window suitable for management.
     /// Excludes frameless HUD overlays, headless monitors, zero-sized windows, and clickthrough windows.
     /// </summary>
-    public virtual bool IsManageable
+    public bool IsManageable
     {
         get
         {
-            if (!this.TryGetWindow(out var w)) return false;
-            if (!this.IsMinimized && !this.HasConfirmedUi) return false;
-            if (w.Size.HasValue && (w.Size.Value.X <= 0 || w.Size.Value.Y <= 0))
-                return false;
-            // NOTE: a zero MaximumSize is Dalamud/ImGui's "no maximum constraint" sentinel, not a
-            // zero-sized window -- windows that set only a MinimumSize (e.g. the Dalamud Plugin Installer,
-            // 830x570) leave MaximumSize at (0,0) and must still be managed (issue #36). Degenerate windows
-            // are already excluded by the actual-Size check above and by HasConfirmedUi (the
-            // ImGuiContextMonitor only confirms UI when the window draws with positive dimensions), so no
-            // MaximumSize guard is needed here.
-            if (w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
-                w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration) ||
-                w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs) ||
-                (w.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs) != 0)
-                return false;
-            if (w.IsClickthrough)
-                return false;
-            return true;
+            var frame = this.CacheFrame;
+            if (frame == 0) return this.EvaluateIsManageable();
+            if (this.manageableFrame != frame)
+            {
+                this.manageableValue = this.EvaluateIsManageable();
+                this.manageableFrame = frame;
+            }
+
+            return this.manageableValue;
         }
+    }
+
+    protected virtual bool EvaluateIsManageable()
+    {
+        if (!this.TryGetWindow(out var w)) return false;
+        if (!this.IsMinimized && !this.HasConfirmedUi) return false;
+        if (w.Size.HasValue && (w.Size.Value.X <= 0 || w.Size.Value.Y <= 0))
+            return false;
+        // NOTE: a zero MaximumSize is Dalamud/ImGui's "no maximum constraint" sentinel, not a
+        // zero-sized window -- windows that set only a MinimumSize (e.g. the Dalamud Plugin Installer,
+        // 830x570) leave MaximumSize at (0,0) and must still be managed (issue #36). Degenerate windows
+        // are already excluded by the actual-Size check above and by HasConfirmedUi (the
+        // ImGuiContextMonitor only confirms UI when the window draws with positive dimensions), so no
+        // MaximumSize guard is needed here.
+        if (w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoTitleBar) ||
+            w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoDecoration) ||
+            w.Flags.HasFlag(Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoInputs) ||
+            (w.Flags & Dalamud.Bindings.ImGui.ImGuiWindowFlags.NoMouseInputs) != 0)
+            return false;
+        if (w.IsClickthrough)
+            return false;
+        return true;
     }
 
 
@@ -155,5 +286,7 @@ public class TrackedWindow
             w.BringToFront();
             w.RequestFocus = true;
         }
+
+        this.InvalidateStateCache();
     }
 }
