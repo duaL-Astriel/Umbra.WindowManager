@@ -501,7 +501,10 @@ public class DalamudWindowTrackerTests
             var bytes = new byte[] { 0x89, 0x50, 0x4E, 0x47 };
             System.IO.File.WriteAllBytes(cachedPath, bytes);
 
-            // Second scan must re-resolve rather than return a permanently cached null.
+            // The miss is remembered so later passes skip the disk (issue #62) and is dropped when a download
+            // finishes or the plugin reloads; either way the next resolve must re-check rather than return a
+            // permanently cached null.
+            tracker.InvalidateIconDiskLookup(name);
             var second = tracker.ResolvePluginContext(fakePlugin);
             Assert.Equal(bytes, second.IconBytes);
         }
