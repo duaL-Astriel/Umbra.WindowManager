@@ -362,6 +362,12 @@ public class WindowManagerService
             && existing.ActiveWindowName == activeWindowName
             && MembersEqual(existing.Members, members))
         {
+            // The monitor clears a member's key on any frame where it isn't reported as docked (e.g. the
+            // first frame after a restore). Re-assert it, or the member stays in the group but is also
+            // rendered as a standalone toolbar button.
+            var existingMembers = existing.Members;
+            for (var i = 0; i < existingMembers.Count; i++)
+                existingMembers[i].DockGroupKey = groupKey;
             return;
         }
 

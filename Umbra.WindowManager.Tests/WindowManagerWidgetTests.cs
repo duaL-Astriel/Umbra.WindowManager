@@ -1002,6 +1002,31 @@ public class WindowManagerWidgetTests
     // --- Grouped dock-group button (V6 split view) ------------------------------------------------
 
     [Fact]
+    public void UpdateButtons_DockMemberKeyClearedForAFrame_IsNotRenderedTwiceAfterReRegister()
+    {
+        var service = new WindowManagerService();
+        var twA = service.RegisterWindow(new DummyWindow("Tab A") { IsOpen = true });
+        var twB = service.RegisterWindow(new DummyWindow("Tab B") { IsOpen = true });
+        var members = new[] { twA, twB };
+        service.RegisterDockGroup("dock_dup", "Tab A", members);
+
+        var widget = CreateWidget(service);
+        widget.DisplayMode = "Taskbar";
+
+        // Minimize/restore: on the first frame back, Tab B isn't reported as docked yet and the monitor
+        // clears its key; on the next frame it is docked again and the unchanged group is re-registered.
+        service.Minimize(twA);
+        service.Restore(twA);
+        twB.DockGroupKey = null;
+        service.RegisterDockGroup("dock_dup", "Tab A", members);
+        widget.UpdateButtons();
+
+        Assert.Single(widget.Node.ChildNodes);
+        Assert.True(widget.WindowNodes.ContainsKey("dock_dup"));
+        Assert.False(widget.WindowNodes.ContainsKey("Tab B"));
+    }
+
+    [Fact]
     public void UpdateButtons_CollapsesDockGroupWithTwoMembers_IntoSingleSplitButton()
     {
         var service = new WindowManagerService();
