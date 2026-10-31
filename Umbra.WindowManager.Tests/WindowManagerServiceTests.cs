@@ -939,5 +939,81 @@ public class WindowManagerServiceTests
         Assert.True(service.AreAnyWindowsOpen);
         Assert.False(service.CanRestoreBulkMinimized);
     }
+
+    [Fact]
+    public void RegisterWindow_SameInstanceAlreadyRegistered_DoesNotAllocateOrBumpGeneration()
+    {
+        var service = new WindowManagerService();
+        var win = new DummyWindow("Steady State##alloc");
+        var first = service.RegisterWindow(win);
+        var generation = service.WindowRegistrationGeneration;
+
+        // Warm up so JIT / tiered compilation doesn't count against the measurement.
+        for (var i = 0; i < 10; i++)
+            service.RegisterWindow(win);
+
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        TrackedWindow last = first;
+        for (var i = 0; i < 1000; i++)
+            last = service.RegisterWindow(win);
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Same(first, last);
+        Assert.Equal(generation, service.WindowRegistrationGeneration);
+        Assert.Equal(0, allocated);
+    }
+
+    [Fact]
+    public void RegisterWindow_ReinstantiatedWindowWithSameName_ReplacesEntryAndBumpsGeneration()
+    {
+        var service = new WindowManagerService();
+        var oldWin = new DummyWindow("Reloaded##alloc");
+        var newWin = new DummyWindow("Reloaded##alloc");
+        var first = service.RegisterWindow(oldWin);
+        var generation = service.WindowRegistrationGeneration;
+
+        var second = service.RegisterWindow(newWin);
+
+        Assert.NotSame(first, second);
+        Assert.True(second.TryGetWindow(out var wrapped));
+        Assert.Same(newWin, wrapped);
+        Assert.Equal(generation + 1, service.WindowRegistrationGeneration);
+        Assert.Same(second, service.RegisterWindow(newWin));
+        Assert.Equal(generation + 1, service.WindowRegistrationGeneration);
+        GC.KeepAlive(oldWin);
+    }
+
+    [Fact]
+    public void RegisterWindow_PrunesDeadWindowsOnceTheIntervalHasElapsed()
+    {
+        var service = new WindowManagerService();
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        void RegisterTemporary() => service.RegisterWindow(new DummyWindow("Temporary##prune"));
+
+        var survivor = new DummyWindow("Survivor##prune");
+        service.RegisterWindow(survivor); // first call prunes and starts the interval
+        RegisterTemporary();
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        var pruneTick = typeof(WindowManagerService).GetField("lastPruneTick", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var dictionary = (System.Collections.Concurrent.ConcurrentDictionary<string, TrackedWindow>)
+            typeof(WindowManagerService).GetField("windows", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(service)!;
+        Assert.Equal(2, dictionary.Count);
+
+        // Inside the interval nothing is pruned...
+        service.RegisterWindow(survivor);
+        Assert.Equal(2, dictionary.Count);
+
+        // ...once it has elapsed, the next registration prunes the dead entry only.
+        pruneTick.SetValue(service, Environment.TickCount64 - 6000);
+        service.RegisterWindow(survivor);
+        Assert.Single(dictionary);
+        Assert.True(dictionary.ContainsKey("Survivor##prune"));
+        GC.KeepAlive(survivor);
+    }
 }
 
