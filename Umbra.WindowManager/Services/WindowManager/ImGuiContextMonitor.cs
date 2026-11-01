@@ -260,7 +260,10 @@ public class ImGuiContextMonitor
             if (win.IsNull) continue;
 
             if (win.IsFallbackWindow)
+            {
+                HideFallbackWindow(win);
                 continue;
+            }
 
             if (!IsWindowActive(win.Active, win.WasActive))
                 continue;
@@ -539,6 +542,21 @@ public class ImGuiContextMonitor
         {
             ctx.NavWindow = default;
         }
+    }
+
+    /// <summary>
+    /// Keeps Dear ImGui's implicit "Debug##Default" fallback window from ever rendering. ImGui begins it in
+    /// every NewFrame and shows it whenever anything calls an item/draw function outside a Begin/End pair
+    /// that frame -- e.g. when opening the Social / Friend List window, it flashed on screen for a few frames.
+    /// Resetting <c>WriteAccessed</c> (see the end of <see cref="OnDraw"/>) only covers calls made before
+    /// this hook; code drawing later in the frame could still set it. <c>Hidden</c> is not recomputed for
+    /// the fallback window until the next NewFrame, so setting it here suppresses it for the rest of the
+    /// frame no matter who touches it, and the render-only counter carries that into the next frame too.
+    /// </summary>
+    internal static void HideFallbackWindow(ImGuiWindowPtr fallback)
+    {
+        fallback.Hidden = true;
+        fallback.HiddenFramesForRenderOnly = 2;
     }
 
     internal void UpdateUnseenFrames()

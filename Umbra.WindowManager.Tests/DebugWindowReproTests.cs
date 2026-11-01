@@ -50,6 +50,42 @@ public class DebugWindowReproTests
     }
 
     [Fact]
+    public unsafe void OnDraw_LateCallOutsideBegin_DebugWindowIsNotRendered()
+    {
+        var ctx = ImGui.CreateContext();
+        ImGui.SetCurrentContext(ctx);
+        var io = ImGui.GetIO();
+        io.DisplaySize = new Vector2(1920, 1080);
+        io.DeltaTime = 1f / 60f;
+        io.Fonts.Build();
+
+        var service = new WindowManagerService();
+        var monitor = new ImGuiContextMonitor(service);
+
+        for (var frame = 0; frame < 3; frame++)
+        {
+            ImGui.NewFrame();
+            var fallback = ctx.CurrentWindow;
+            Assert.True(fallback.IsFallbackWindow);
+
+            monitor.OnDraw();
+
+            // Something drawing AFTER the monitor (another plugin or widget) submits an item outside any
+            // Begin/End. This marks the fallback window WriteAccessed, which alone used to make ImGui render
+            // the "Debug##Default" window for that frame.
+            ImGui.Text("stray item");
+            Assert.True(fallback.WriteAccessed);
+
+            ImGui.EndFrame();
+            ImGui.Render();
+
+            Assert.False(fallback.Active && !fallback.Hidden, $"Debug##Default rendered on frame {frame}");
+        }
+
+        ImGui.DestroyContext(ctx);
+    }
+
+    [Fact]
     public unsafe void OnDraw_FallbackAndInternalWindows_AreNeverTracked()
     {
         var ctx = ImGui.CreateContext();
